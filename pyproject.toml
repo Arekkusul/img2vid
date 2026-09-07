@@ -3,7 +3,7 @@ name = "img2vid"
 version = "0.1.0"
 description = "Local image-to-video generation (Wan2.2 TI2V-5B via mlx-gen) with a Gradio UI"
 requires-python = ">=3.13"
-dependencies = ["mlx-gen", "gradio"]
+dependencies = ["mlx-gen", "gradio", "torch", "safetensors"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "mypy"]
