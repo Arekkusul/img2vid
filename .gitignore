@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+outputs/
+*.mp4
+.hf-cache/
+WORKING-CONTEXT.md
+.env

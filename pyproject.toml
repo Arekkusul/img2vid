@@ -1,0 +1,37 @@
+[project]
+name = "img2vid"
+version = "0.1.0"
+description = "Local image-to-video generation (Wan2.2 TI2V-5B via mlx-gen) with a Gradio UI"
+requires-python = ">=3.13"
+dependencies = ["mlx-gen", "gradio"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff", "mypy"]
+
+[project.scripts]
+img2vid = "img2vid.cli:main"
+img2vid-ui = "img2vid.ui:launch"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["src/img2vid"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
