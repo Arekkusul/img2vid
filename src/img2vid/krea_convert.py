@@ -1,5 +1,7 @@
+import argparse
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -167,7 +169,12 @@ def expected_transformer_keys(cfg: Krea2Config) -> set[str]:
     return set(keys)
 
 
-def dequantize(tensor: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
+_FP8_DTYPES = {torch.float8_e4m3fn, torch.float8_e5m2}
+
+
+def dequantize(tensor: torch.Tensor, scale: torch.Tensor | None, *, key: str = "") -> torch.Tensor:
+    if tensor.dtype in _FP8_DTYPES and scale is None:
+        raise ConversionError(f"{key} is fp8-quantized but has no companion weight_scale tensor")
     if scale is None:
         return tensor.to(torch.bfloat16)
     return (tensor.to(torch.float32) * scale.to(torch.float32)).to(torch.bfloat16)
@@ -177,16 +184,19 @@ def convert_transformer(source_path: Path, output_dir: Path, cfg: Krea2Config | 
     """Convert a ComfyUI-style Krea 2 transformer checkpoint into the diffusers-style
     `transformer/` snapshot dir mlx-gen-krea's `Weights::from_dir` expects.
 
-    Raises FileNotFoundError if `source_path` doesn't exist, ConversionError if any source key
-    doesn't match the expected naming or the converted key set doesn't exactly match the
-    architecture's expected keys (missing or extra).
+    Raises FileNotFoundError if `source_path` doesn't exist, ConversionError if the file isn't a
+    valid safetensors checkpoint, any source key doesn't match the expected naming, or the
+    converted key set doesn't exactly match the architecture's expected keys (missing or extra).
     """
     cfg = cfg or Krea2Config.turbo()
     source_path = Path(source_path)
     if not source_path.is_file():
         raise FileNotFoundError(f"Source checkpoint not found: {source_path}")
 
-    raw = load_file(str(source_path))
+    try:
+        raw = load_file(str(source_path))
+    except Exception as exc:
+        raise ConversionError(f"failed to read {source_path} as a safetensors checkpoint: {exc}") from exc
 
     converted: dict[str, torch.Tensor] = {}
     for key, tensor in raw.items():
@@ -196,7 +206,7 @@ def convert_transformer(source_path: Path, output_dir: Path, cfg: Krea2Config | 
         if target is None:
             continue
         scale = raw.get(f"{key}_scale") if key.endswith(".weight") else None
-        converted[target] = dequantize(tensor, scale)
+        converted[target] = dequantize(tensor, scale, key=key)
 
     expected = expected_transformer_keys(cfg)
     actual = set(converted.keys())
@@ -233,3 +243,27 @@ def _config_json(cfg: Krea2Config) -> dict:
         "text_hidden_dim": cfg.text_hidden_dim,
         "text_intermediate_size": cfg.text_intermediate_size,
     }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="img2vid-krea-convert",
+        description="Convert a ComfyUI-style Krea 2 transformer checkpoint into the diffusers-style "
+        "snapshot layout mlx-gen-krea expects.",
+    )
+    parser.add_argument("--source", required=True, help="Path to the source .safetensors file")
+    parser.add_argument("--output-dir", required=True, help="Snapshot directory to write transformer/ into")
+    args = parser.parse_args(argv)
+
+    try:
+        transformer_dir = convert_transformer(Path(args.source), Path(args.output_dir))
+    except (FileNotFoundError, ConversionError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(str(transformer_dir))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

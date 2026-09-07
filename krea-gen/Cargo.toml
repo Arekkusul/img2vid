@@ -1,0 +1,19 @@
+[package]
+name = "krea-gen"
+version = "0.1.0"
+edition = "2021"
+description = "CLI wrapper around mlx-gen-krea for img2vid's standalone Krea 2 image generation feature."
+
+[dependencies]
+mlx-gen = { git = "https://github.com/SceneWorks/mlx-gen" }
+mlx-gen-krea = { git = "https://github.com/SceneWorks/mlx-gen" }
+# Standard, widely-used Rust argv parser -- mlx-gen-krea's own examples take args via env vars
+# (not meant as a real CLI), so this is genuinely new surface for us, not duplicated capability.
+clap = { version = "4", features = ["derive"] }
+# PNG read/write for generation output + edit-mode reference image input; mirrors mlx-gen-krea's
+# own examples (krea_t2i.rs, krea_edit_smoke.rs), which use the same crate for the same purpose.
+image = "0.25"
+
+[[bin]]
+name = "krea-gen"
+path = "src/main.rs"

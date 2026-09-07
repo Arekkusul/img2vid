@@ -1,0 +1,10 @@
+# Match mlx-gen's own build config exactly (see their .cargo/config.toml): build MLX at the
+# macOS 26.2 deployment target so the Apple matrix-unit ("NAX") Metal kernels compile in and
+# codegen correctly for bf16/f16 GEMM + fused SDPA — below 26.2 they silently miscompile to
+# garbage for 16-bit ops rather than failing loudly. This machine runs macOS 26.2 exactly.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "26.2"
+RUST_TEST_THREADS = { value = "1", force = true }
+# Command Line Tools alone lack the `metal` compiler MLX's kernels need; point at full Xcode
+# explicitly rather than relying on `xcode-select`'s global symlink (avoids a system-wide change).
+DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer"

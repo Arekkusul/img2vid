@@ -10,3 +10,6 @@ outputs/
 .hf-cache/
 WORKING-CONTEXT.md
 .env
+target/
+*.png
+*.safetensors

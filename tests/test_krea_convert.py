@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ from img2vid.krea_convert import (
     Krea2Config,
     convert_transformer,
     expected_transformer_keys,
+    main,
     remap_key,
 )
 
@@ -251,4 +253,54 @@ def test_convert_transformer_incomplete_source_raises_conversion_error(tmp_path)
     save_file(tensors, str(source))
 
     with pytest.raises(ConversionError, match="missing"):
+        convert_transformer(source, tmp_path / "snapshot", cfg=TINY_CFG)
+
+
+def test_cli_missing_args_exits_nonzero():
+    with pytest.raises(SystemExit) as exc_info:
+        main([])
+    assert exc_info.value.code != 0
+
+
+def test_cli_success_prints_transformer_dir_and_exits_zero(tmp_path, capsys):
+    out_dir = tmp_path / "snapshot" / "transformer"
+    with patch("img2vid.krea_convert.convert_transformer", return_value=out_dir) as mock_convert:
+        exit_code = main(["--source", "src.safetensors", "--output-dir", str(tmp_path / "snapshot")])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert str(out_dir) in captured.out
+    mock_convert.assert_called_once()
+
+
+def test_cli_conversion_error_prints_message_and_exits_nonzero(capsys):
+    with patch("img2vid.krea_convert.convert_transformer", side_effect=ConversionError("bad mapping")):
+        exit_code = main(["--source", "src.safetensors", "--output-dir", "out"])
+    assert exit_code != 0
+    captured = capsys.readouterr()
+    assert "bad mapping" in captured.err
+
+
+def test_cli_missing_source_prints_message_and_exits_nonzero(capsys):
+    with patch("img2vid.krea_convert.convert_transformer", side_effect=FileNotFoundError("nope")):
+        exit_code = main(["--source", "src.safetensors", "--output-dir", "out"])
+    assert exit_code != 0
+    captured = capsys.readouterr()
+    assert "nope" in captured.err
+
+
+def test_convert_transformer_raises_on_fp8_tensor_missing_scale(tmp_path):
+    tensors = _tiny_source_tensors()
+    del tensors[f"{SRC}blocks.0.attn.wq.weight_scale"]
+    source = tmp_path / "source.safetensors"
+    save_file(tensors, str(source))
+
+    with pytest.raises(ConversionError, match="weight_scale"):
+        convert_transformer(source, tmp_path / "snapshot", cfg=TINY_CFG)
+
+
+def test_convert_transformer_raises_conversion_error_on_unreadable_source(tmp_path):
+    source = tmp_path / "not_really_safetensors.safetensors"
+    source.write_bytes(b"this is not a valid safetensors file")
+
+    with pytest.raises(ConversionError, match="safetensors"):
         convert_transformer(source, tmp_path / "snapshot", cfg=TINY_CFG)
