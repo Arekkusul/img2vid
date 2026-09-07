@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from img2vid.generate import GenerationError, generate_video
+from img2vid.generate import GenerationError, _default_mlxgen_bin, generate_video
 
 
 @pytest.fixture
@@ -108,6 +108,26 @@ def test_env_contains_dyld_library_path(image_path, tmp_path):
         generate_video(image_path, "a prompt", output_path=output_path)
     env = mock_run.call_args.kwargs["env"]
     assert env["DYLD_LIBRARY_PATH"] == "/opt/homebrew/opt/expat/lib"
+
+
+def test_default_mlxgen_bin_prefers_sibling_of_executable(tmp_path):
+    fake_venv_bin = tmp_path / "bin"
+    fake_venv_bin.mkdir()
+    fake_python = fake_venv_bin / "python"
+    fake_python.write_text("")
+    fake_mlxgen = fake_venv_bin / "mlxgen"
+    fake_mlxgen.write_text("")
+
+    assert _default_mlxgen_bin(str(fake_python)) == str(fake_mlxgen)
+
+
+def test_default_mlxgen_bin_falls_back_to_path_lookup_when_no_sibling(tmp_path):
+    fake_venv_bin = tmp_path / "bin"
+    fake_venv_bin.mkdir()
+    fake_python = fake_venv_bin / "python"
+    fake_python.write_text("")
+
+    assert _default_mlxgen_bin(str(fake_python)) == "mlxgen"
 
 
 def test_timeout_raises_generation_error(image_path, tmp_path):

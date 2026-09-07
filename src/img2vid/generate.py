@@ -1,9 +1,26 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 DYLD_LIBRARY_PATH = "/opt/homebrew/opt/expat/lib"
 DEFAULT_MODEL = "AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit"
+
+
+def _default_mlxgen_bin(executable: str | None = None) -> str:
+    """Prefer the mlxgen console script installed alongside this interpreter.
+
+    A bare "mlxgen" only resolves via $PATH, which isn't guaranteed to include the
+    venv's bin dir unless the venv was `source`-activated — e.g. invoking
+    `.venv/bin/img2vid` directly (as scripts/run_ui.sh and a packaged install both do)
+    does not activate the venv. sys.executable is always the venv's python in that case,
+    so its sibling `mlxgen` is the reliable target.
+    """
+    candidate = Path(executable or sys.executable).parent / "mlxgen"
+    return str(candidate) if candidate.is_file() else "mlxgen"
+
+
+DEFAULT_MLXGEN_BIN = _default_mlxgen_bin()
 
 
 class GenerationError(RuntimeError):
@@ -25,7 +42,7 @@ def generate_video(
     seed: int | None = None,
     model: str = DEFAULT_MODEL,
     low_ram: bool = True,
-    mlxgen_bin: str = "mlxgen",
+    mlxgen_bin: str = DEFAULT_MLXGEN_BIN,
     timeout: float = 1800,
 ) -> Path:
     """Generate a video from an image + prompt via the mlxgen CLI.

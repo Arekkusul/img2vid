@@ -41,6 +41,11 @@ scripts/download_model.sh # downloads the ~17GB model weights (checks free disk 
 
 ## Usage
 
+Activate the environment first (needed once per shell session):
+```sh
+source scripts/env.sh && source .venv/bin/activate
+```
+
 CLI:
 ```sh
 img2vid --image photo.jpg --prompt "the person waves at the camera" --output outputs/clip.mp4
@@ -49,8 +54,15 @@ img2vid --image photo.jpg --prompt "the person waves at the camera" --output out
 Web UI:
 ```sh
 scripts/run_ui.sh
-# open the printed local URL, upload an image, enter a prompt, click Generate
+# open the printed local URL (http://127.0.0.1:7860), upload an image, enter a prompt, click Generate
 ```
+
+### Verified performance (measured on this machine: M4 Pro, 64GB unified memory)
+
+Default settings (`832x480`, 81 frames, 25 steps, `--low-ram`): **~17.5 minutes** wall clock,
+GPU (Metal via MLX) at 98-100% utilization throughout. Output: 4.05s clip at 20fps. A minimal
+smoke-test run (9 frames, 4 steps) took ~79s — useful for quickly checking the pipeline works
+before committing to a full-length generation.
 
 ## Development
 
