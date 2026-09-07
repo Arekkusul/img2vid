@@ -1,13 +1,33 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mlx_gen::gen_core::{
-    CancelFlag, Conditioning, GenerationOutput, GenerationRequest, LoadSpec, WeightsSource,
+    CancelFlag, Conditioning, GenerationOutput, GenerationRequest, LoadSpec, Progress, Quant,
+    WeightsSource,
 };
 use mlx_gen::media::Image;
 use mlx_gen::{AdapterKind, AdapterSpec};
 use mlx_gen_krea::model::{load_edit, load_raw, load_turbo_edit};
+
+/// CLI-facing mirror of `mlx_gen::gen_core::Quant` (plus a "none" variant) -- `Quant` itself
+/// has no default/none case, so `Option<Quant>` isn't directly clap-deriveable as one enum.
+#[derive(Clone, Copy, ValueEnum)]
+enum QuantArg {
+    None,
+    Q4,
+    Q8,
+}
+
+impl QuantArg {
+    fn into_quant(self) -> Option<Quant> {
+        match self {
+            QuantArg::None => None,
+            QuantArg::Q4 => Some(Quant::Q4),
+            QuantArg::Q8 => Some(Quant::Q8),
+        }
+    }
+}
 
 /// Generate an image with Krea 2, or edit one given a reference image + the identity-edit LoRA.
 /// Thin CLI wrapper around mlx-gen-krea, mirroring the shape of img2vid's existing `img2vid`
@@ -55,6 +75,13 @@ struct Args {
     /// Use the distilled, CFG-free Turbo edit path instead of the full-CFG Raw edit.
     #[arg(long)]
     turbo_edit: bool,
+
+    /// Quantize weights at load time. Q8 is documented near-lossless for this model family and
+    /// is typically faster on Apple Silicon too (these workloads tend to be memory-bandwidth
+    /// bound, so moving half the weight data per step matters more than raw FLOPs). Q4 trades
+    /// some quality for an even smaller/faster load.
+    #[arg(long, value_enum, default_value = "none")]
+    quantize: QuantArg,
 }
 
 fn load_rgb(path: &PathBuf) -> Result<Image, String> {
@@ -77,7 +104,8 @@ fn save_png(img: &Image, path: &PathBuf) -> Result<(), String> {
 }
 
 fn run(args: Args) -> Result<(), String> {
-    let base_spec = LoadSpec::new(WeightsSource::Dir(args.snapshot.clone()));
+    let mut base_spec = LoadSpec::new(WeightsSource::Dir(args.snapshot.clone()));
+    base_spec.quantize = args.quantize.into_quant();
 
     let (generator, conditioning) = if let Some(source_path) = &args.edit_source {
         let spec = match &args.lora {
@@ -126,7 +154,11 @@ fn run(args: Args) -> Result<(), String> {
     };
 
     let output = generator
-        .generate(&request, &mut |_| {})
+        .generate(&request, &mut |p| match p {
+            Progress::Step { current, total } => eprintln!("step {current}/{total}"),
+            Progress::Decoding => eprintln!("decoding..."),
+            Progress::Loading(phase) => eprintln!("loading {phase:?}..."),
+        })
         .map_err(|e| format!("generate: {e}"))?;
 
     let image = match output {

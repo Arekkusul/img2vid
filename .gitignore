@@ -13,3 +13,4 @@ WORKING-CONTEXT.md
 target/
 *.png
 *.safetensors
+ltx-2-mlx-upstream/
