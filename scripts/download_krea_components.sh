@@ -14,7 +14,11 @@ if ! "$VENV_BIN/hf" auth whoami >/dev/null 2>&1; then
 fi
 
 "$VENV_BIN/hf" download "$MODEL" \
-  --include "text_encoder/*" "vae/*" "tokenizer/*" "scheduler/*" "model_index.json" \
+  --include "text_encoder/*" \
+  --include "vae/*" \
+  --include "tokenizer/*" \
+  --include "scheduler/*" \
+  --include "model_index.json" \
   --local-dir "$OUTPUT_DIR"
 
 echo "--- downloaded to $OUTPUT_DIR ---"

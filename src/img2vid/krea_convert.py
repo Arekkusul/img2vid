@@ -76,6 +76,7 @@ _TOP_LEVEL_MAP = {
 
 _BLOCK_RE = re.compile(r"^blocks\.(\d+)\.(.+)$")
 _TEXT_FUSION_BLOCK_RE = re.compile(r"^txtfusion\.(layerwise_blocks|refiner_blocks)\.(\d+)\.(.+)$")
+_SINGLE_BLOCK_SCALE_SHIFT_RE = re.compile(r"^transformer_blocks\.\d+\.scale_shift_table$")
 
 
 def remap_key(source_key: str) -> str | None:
@@ -206,7 +207,14 @@ def convert_transformer(source_path: Path, output_dir: Path, cfg: Krea2Config | 
         if target is None:
             continue
         scale = raw.get(f"{key}_scale") if key.endswith(".weight") else None
-        converted[target] = dequantize(tensor, scale, key=key)
+        value = dequantize(tensor, scale, key=key)
+        if _SINGLE_BLOCK_SCALE_SHIFT_RE.match(target):
+            # Source `blocks.{i}.mod.lin` is a flat [6 * hidden_size] vector (the per-block
+            # DoubleSharedModulation offset); the loader expects the 6-factor table shape
+            # [6, hidden_size] (unlike final_layer's scale_shift_table, which the source already
+            # stores 2-D as [2, hidden_size] — no reshape needed there).
+            value = value.reshape(6, cfg.hidden_size)
+        converted[target] = value
 
     expected = expected_transformer_keys(cfg)
     actual = set(converted.keys())

@@ -227,6 +227,32 @@ def test_convert_transformer_dequantizes_fp8_correctly(tmp_path):
     assert torch.allclose(wq.float(), torch.full_like(wq.float(), 7.0), atol=0.1)
 
 
+def test_convert_transformer_reshapes_single_block_scale_shift_table(tmp_path):
+    """The Rust loader (mlx-gen-krea) rejects a flat [6*hidden] scale_shift_table -- confirmed
+    live against the real model this reshape was missing and every generation failed to load."""
+    source = tmp_path / "source.safetensors"
+    save_file(_tiny_source_tensors(), str(source))
+
+    out_dir = convert_transformer(source, tmp_path / "snapshot", cfg=TINY_CFG)
+    converted = load_file(str(out_dir / "diffusion_pytorch_model.safetensors"))
+
+    table = converted["transformer_blocks.0.scale_shift_table"]
+    assert tuple(table.shape) == (6, TINY_CFG.hidden_size)
+
+
+def test_convert_transformer_does_not_reshape_final_layer_scale_shift_table(tmp_path):
+    """final_layer's source (`last.modulation.lin`) is already 2-D [2, hidden] -- only the
+    per-block flat `mod.lin` needs reshaping, not this one."""
+    source = tmp_path / "source.safetensors"
+    save_file(_tiny_source_tensors(), str(source))
+
+    out_dir = convert_transformer(source, tmp_path / "snapshot", cfg=TINY_CFG)
+    converted = load_file(str(out_dir / "diffusion_pytorch_model.safetensors"))
+
+    table = converted["final_layer.scale_shift_table"]
+    assert tuple(table.shape) == (2, TINY_CFG.hidden_size)
+
+
 def test_convert_transformer_passes_through_dense_tensors_as_bf16(tmp_path):
     source_tensors = _tiny_source_tensors()
     source = tmp_path / "source.safetensors"

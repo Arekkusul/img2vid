@@ -1,10 +1,12 @@
 # img2vid
 
-Local image-to-video generation: give it an image + a text prompt, get back a generated
-video clip. Runs entirely on-device via [MLX](https://github.com/ml-explore/mlx) — no cloud
-API, no CUDA required.
+Two independent local generation tools, both on-device via [MLX](https://github.com/ml-explore/mlx)
+— no cloud API, no CUDA required:
+- **Image-to-video**: give it an image + a text prompt, get back a generated video clip.
+- **Text-to-image / image-edit** (standalone, see below): give it a prompt, get back an image;
+  optionally give it a reference image too for editing.
 
-## Model
+## Video: Model
 
 [Wan2.2 TI2V-5B](https://huggingface.co/AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit)
 (Alibaba, Apache 2.0), a dense 5B-parameter unified text+image-to-video diffusion model, run
@@ -32,14 +34,14 @@ nearly all free disk on a machine with ~43GB free. Not installed by default. To 
 via `mlxgen download --model AbstractFramework/wan2.2-i2v-a14b-diffusers-8bit` and pass
 `--model` to override the default in `img2vid generate` / the UI.
 
-## Setup
+## Video: Setup
 
 ```sh
 scripts/setup.sh          # creates .venv, installs deps (handles a local Homebrew pyexpat bug)
 scripts/download_model.sh # downloads the ~17GB model weights (checks free disk first)
 ```
 
-## Usage
+## Video: Usage
 
 Activate the environment first (needed once per shell session):
 ```sh
@@ -63,6 +65,62 @@ Default settings (`832x480`, 81 frames, 25 steps, `--low-ram`): **~17.5 minutes*
 GPU (Metal via MLX) at 98-100% utilization throughout. Output: 4.05s clip at 20fps. A minimal
 smoke-test run (9 frames, 4 steps) took ~79s — useful for quickly checking the pipeline works
 before committing to a full-length generation.
+
+## Image: Model
+
+[Krea 2 Raw](https://huggingface.co/krea/Krea-2-Raw) (Krea.ai, 12B-parameter dense single-stream
+text-to-image DiT), run through [`mlx-gen-krea`](https://github.com/SceneWorks/mlx-gen) (Apache 2.0),
+a Rust-native MLX inference library — this project builds a small Rust CLI (`krea-gen/`) against it,
+since it's a library, not a standalone tool.
+
+**Unlike the video pipeline, this doesn't use a pre-packaged model download.** The transformer
+weights are converted locally from a user-supplied fp8 checkpoint (ComfyUI-style, from an
+unverified third-party source) via `scripts/convert_krea_model.sh` — see `src/img2vid/krea_convert.py`
+for the exact key-remapping/dequantization logic, derived directly from `mlx-gen-krea`'s Rust
+source, not guessed. The text encoder + VAE come from the official (gated) HF repo separately via
+`scripts/download_krea_components.sh`.
+
+**License**: [Krea 2 Community License](https://huggingface.co/krea/Krea-2-Raw/blob/main/LICENSE.pdf)
+— free for personal/non-commercial use. It contractually requires anyone *deploying* the model to
+implement content-filtering to prevent illegal/NCII/CSAM generation. This project is a plain
+pass-through wrapper with no such filtering built in — appropriate for personal local use, not for
+redistribution or hosting to others without adding that layer yourself.
+
+### Setup
+
+Requires Xcode (not just Command Line Tools — `mlx-gen-krea`'s Metal kernels compile from source)
+and Rust (`rustup`). Both one-time system setup, not scripted here.
+
+```sh
+scripts/build_krea_gen.sh              # cargo build --release (first build compiles MLX's C++ core)
+scripts/convert_krea_model.sh          # converts ~/Downloads/imagemodelfp8.safetensors by default
+scripts/download_krea_components.sh    # text encoder + VAE from the gated krea/Krea-2-Raw repo
+                                        # (needs `hf auth login` + accepting the license on the model page first)
+```
+
+### Usage
+
+```sh
+img2vid-image --prompt "a red fox sitting in a snowy forest, photorealistic, soft morning light" \
+  --output outputs/fox.png --steps 52 --guidance 3.5
+```
+
+Image-to-image editing (optional identity-preserving LoRA):
+```sh
+img2vid-image --prompt "change the background to a snowy mountain" \
+  --edit-source photo.jpg --output outputs/edited.png
+```
+
+Web UI: `scripts/run_image_ui.sh` — upload a reference image to switch to edit mode, or leave it
+blank for text-to-image.
+
+### Verified performance (measured on this machine: M4 Pro, 64GB unified memory)
+
+Krea 2 Raw is a **true classifier-free-guidance model, not distilled for few-step inference** —
+at only 8 steps, output was structurally correct (right composition/pose) but had visible color
+corruption and banding artifacts. At the model's documented **52 steps, guidance 3.5**: a real,
+clean 1024x1024 photorealistic image in **~41 minutes**, GPU at 99% utilization throughout. Use a
+low step count (e.g. 8-20) only for fast pipeline smoke-tests, not for real output.
 
 ## Development
 
