@@ -4,6 +4,10 @@ from safetensors.torch import load_file, save_file
 
 from img2vid.ltx_convert import (
     ConversionError,
+    _build_hadamard,
+    _dequantize_tensor,
+    _read_comfy_quant,
+    _rotate_weight,
     convert_checkpoint,
     dequantize_int8_simple,
     dequantize_w4a8_int8_weight,
@@ -94,6 +98,45 @@ def test_dequantize_int8_simple():
     assert result.dtype == torch.bfloat16
 
 
+def test_dequantize_int8_simple_with_convrot_matches_manual_rotation():
+    # Real LTX-2.5 checkpoints mark ~57% of quantized weights as this "int8_tensorwise"
+    # scheme via their own `*.comfy_quant` metadata (`{"convrot": true, ...}`) -- these
+    # went through the SAME ConvRot rotation as the w4a8 codebook path. Skipping it (the
+    # original bug) produces a tensor with the right aggregate std (rotation is orthogonal,
+    # so it preserves norm) but near-zero per-element correlation with the true weights --
+    # confirmed against the real checkpoint (0.06 corr without rotation, 0.99 with it).
+    torch.manual_seed(0)
+    q = torch.randint(-100, 100, (4, 256), dtype=torch.int8)
+    scale = torch.rand(4, 1) + 0.1
+    result = dequantize_int8_simple(q, scale, convrot=True, convrot_groupsize=256)
+
+    plain = (q.float() * scale.float())
+    h = _build_hadamard(256)
+    expected = _rotate_weight(plain, h, 256).to(torch.bfloat16)
+
+    assert result.dtype == torch.bfloat16
+    assert torch.equal(result, expected)
+    # Rotation must actually change values -- otherwise this test can't distinguish the fix.
+    assert not torch.allclose(result.float(), plain.float(), atol=1e-2)
+
+
+def test_read_comfy_quant_parses_json_metadata():
+    payload = b'{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256}'
+    raw = {"transformer_blocks.0.attn1.to_v.comfy_quant": torch.tensor(list(payload), dtype=torch.uint8)}
+    parsed = _read_comfy_quant(raw, "transformer_blocks.0.attn1.to_v.weight")
+    assert parsed == {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}
+
+
+def test_read_comfy_quant_missing_key_returns_none():
+    assert _read_comfy_quant({}, "transformer_blocks.0.attn1.to_v.weight") is None
+
+
+def test_read_comfy_quant_non_weight_key_returns_none():
+    payload = b'{"convrot": true}'
+    raw = {"transformer_blocks.0.attn1.to_v.comfy_quant": torch.tensor(list(payload), dtype=torch.uint8)}
+    assert _read_comfy_quant(raw, "transformer_blocks.0.attn1.to_v.bias") is None
+
+
 def test_dequantize_w4a8_int8_weight_roundtrips_a_known_value():
     # Build a weight, quantize it "by hand" using the exact reference recipe (codebook levels
     # picked so nibble index round-trips exactly), then confirm our dequant recovers it.
@@ -123,6 +166,25 @@ def test_dequantize_w4a8_int8_weight_roundtrips_a_known_value():
     # and non-degenerate rather than asserting an exact per-element value.
     assert torch.isfinite(result.float()).all()
     assert result.float().abs().sum() > 0
+
+
+def test_dequantize_tensor_applies_convrot_for_simple_scale_scheme_per_metadata():
+    # Reproduces the real checkpoint's "int8_tensorwise" layout: a plain-int8 `.weight` +
+    # `.weight_scale` companion (underscore-appended to the full key, per this project's
+    # other quant-metadata suffixes) plus a `.comfy_quant` JSON blob (dot-replacing
+    # ".weight", per the source file's own -- inconsistent -- naming) declaring convrot.
+    torch.manual_seed(1)
+    q = torch.randint(-100, 100, (4, 256), dtype=torch.int8)
+    scale = torch.rand(4, 1) + 0.1
+    payload = b'{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256}'
+    raw = {
+        "transformer_blocks.0.attn1.to_v.weight": q,
+        "transformer_blocks.0.attn1.to_v.weight_scale": scale,
+        "transformer_blocks.0.attn1.to_v.comfy_quant": torch.tensor(list(payload), dtype=torch.uint8),
+    }
+    result = _dequantize_tensor(raw, "transformer_blocks.0.attn1.to_v.weight")
+    expected = dequantize_int8_simple(q, scale, convrot=True, convrot_groupsize=256)
+    assert torch.equal(result, expected)
 
 
 def test_dequantize_w4a8_int8_weight_rejects_bad_shapes():
@@ -165,6 +227,10 @@ def _tiny_source_tensors() -> dict:
         -100, 100, (8, 256), dtype=torch.int8
     )
     tensors[f"{SRC}transformer_blocks.0.attn1.to_v.weight_scale"] = torch.rand(8, 1) + 0.1
+    _to_v_comfy_quant = b'{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":256}'
+    tensors[f"{SRC}transformer_blocks.0.attn1.to_v.comfy_quant"] = torch.tensor(
+        list(_to_v_comfy_quant), dtype=torch.uint8
+    )
     # ff (needs renaming) -- dense, to keep the fixture small.
     tensors[f"{SRC}transformer_blocks.0.ff.net.0.proj.weight"] = torch.randn(16, 8, dtype=torch.bfloat16)
     tensors[f"{SRC}transformer_blocks.0.ff.net.2.weight"] = torch.randn(8, 16, dtype=torch.bfloat16)
@@ -191,8 +257,11 @@ def test_convert_checkpoint_splits_transformer_and_connector(tmp_path):
     assert connector_path.is_file()
 
     connector = load_file(str(connector_path))
-    assert "video_embeddings_connector.learnable_registers" in connector
-    assert "video_embeddings_connector.transformer_1d_blocks.0.attn1.to_out.0.weight" in connector
+    # load_split_safetensors(path, prefix="connector.") strips this prefix on load --
+    # confirmed against the real loader source, same class of bug as the transformer's
+    # "transformer." prefix (caught by the real E2E run, not by planning).
+    assert "connector.video_embeddings_connector.learnable_registers" in connector
+    assert "connector.video_embeddings_connector.transformer_1d_blocks.0.attn1.to_out.0.weight" in connector
     # Connector keeps full precision -- no quantized-weight artifacts.
     assert all(not k.endswith((".scales", ".biases")) for k in connector)
 
@@ -205,16 +274,18 @@ def test_convert_checkpoint_renames_and_quantizes_transformer_weights(tmp_path):
     convert_checkpoint(source, out_dir)
 
     transformer = mx.load(str(out_dir / "transformer-dev.safetensors"))
-    # Renamed correctly.
-    assert "transformer_blocks.0.ff.proj_in.weight" in transformer
-    assert "transformer_blocks.0.ff.proj_out.weight" in transformer
+    # The loaded model wraps the DiT as `self.transformer` -- every key needs that prefix
+    # (confirmed against dgrauet/ltx-2-mlx's own parity test; missing this made the real
+    # E2E run fail to load with "Missing 4091 parameters").
+    assert "transformer.transformer_blocks.0.ff.proj_in.weight" in transformer
+    assert "transformer.transformer_blocks.0.ff.proj_out.weight" in transformer
     # The originally-quantized Linear weight got MLX-native-quantized (not left dense bf16).
-    assert "transformer_blocks.0.attn1.to_k.scales" in transformer
-    assert "transformer_blocks.0.attn1.to_k.biases" in transformer
-    assert transformer["transformer_blocks.0.attn1.to_k.weight"].dtype == mx.uint32
+    assert "transformer.transformer_blocks.0.attn1.to_k.scales" in transformer
+    assert "transformer.transformer_blocks.0.attn1.to_k.biases" in transformer
+    assert transformer["transformer.transformer_blocks.0.attn1.to_k.weight"].dtype == mx.uint32
     # A tensor that was never quantized in the source (q_norm) stays plain/dense.
-    assert "transformer_blocks.0.attn1.q_norm.weight" in transformer
-    assert "transformer_blocks.0.attn1.q_norm.weight.scales" not in transformer
+    assert "transformer.transformer_blocks.0.attn1.q_norm.weight" in transformer
+    assert "transformer.transformer_blocks.0.attn1.q_norm.weight.scales" not in transformer
 
 
 def test_convert_checkpoint_missing_source_raises_file_not_found(tmp_path):

@@ -6,7 +6,6 @@ from pathlib import Path
 import mlx.core as mx
 import torch
 from safetensors import safe_open
-from safetensors.torch import load_file
 
 SOURCE_PREFIX = "model.diffusion_model."
 CONNECTOR_PREFIXES = ("video_embeddings_connector.", "audio_embeddings_connector.")
@@ -64,9 +63,50 @@ def remap_key(source_key: str) -> tuple[str, str] | None:
     return key, "transformer"
 
 
-def dequantize_int8_simple(q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Plain per-channel int8 dequantization: value = q * scale (no codebook/rotation)."""
-    return (q.float() * scale.float()).to(torch.bfloat16)
+def dequantize_int8_simple(
+    q: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    convrot: bool = False,
+    convrot_groupsize: int = DEFAULT_CONVROT_GROUPSIZE,
+) -> torch.Tensor:
+    """Per-channel int8 dequantization: value = q * scale, then an optional inverse
+    ConvRot (Hadamard) rotation.
+
+    Confirmed against the source checkpoint's own `*.comfy_quant` metadata (a JSON blob
+    packed as a uint8 tensor, e.g. `{"format":"int8_tensorwise","convrot":true,
+    "convrot_groupsize":256}`): roughly 57% of this project's LTX-2.5 weights use this
+    "int8_tensorwise" scheme instead of the w4a8 codebook scheme, and -- unlike Krea 2's
+    identically-named simple-scale format -- they ALSO went through the same ConvRot
+    rotation as the codebook path. Skipping it silently produces a tensor with correct
+    aggregate statistics (Hadamard rotation is orthogonal, so it preserves norm/std) but
+    near-zero correlation with the true weight values per-element: verified by dequantizing
+    a real affected tensor both ways and comparing against the official MLX pack's own
+    weights (0.06 correlation without rotation, 0.99 with it).
+    """
+    dequant = q.float() * scale.float()
+    if convrot:
+        h = _build_hadamard(convrot_groupsize)
+        dequant = _rotate_weight(dequant, h, convrot_groupsize)
+    return dequant.to(torch.bfloat16)
+
+
+def _read_comfy_quant(raw, key: str) -> dict | None:
+    """Parse the `*.comfy_quant` metadata JSON for a `.weight` key, if present.
+
+    Stored as a UTF-8 JSON string packed into a uint8 tensor (confirmed against
+    ComfyUI's own `comfy/utils.py::convert_old_quants`). Unlike this project's other
+    quantization-metadata companions (`_codebook`, `_scale`, etc., appended directly to
+    the full key with an underscore), `comfy_quant` replaces the trailing `.weight` with
+    `.comfy_quant` -- a real inconsistency in the source file's own naming, not ours.
+    """
+    if not key.endswith(".weight"):
+        return None
+    cq_key = f"{key.removesuffix('.weight')}.comfy_quant"
+    if cq_key not in raw:
+        return None
+    tensor = raw[cq_key]
+    return json.loads(bytes(tensor.tolist()).decode("utf-8"))
 
 
 _HADAMARD_CACHE: dict[int, torch.Tensor] = {}
@@ -159,7 +199,34 @@ def dequantize_w4a8_int8_weight(
     return _rotate_weight(weight_rotated.float(), h, convrot_groupsize).to(output_dtype)
 
 
-def _dequantize_tensor(raw: dict[str, torch.Tensor], key: str) -> torch.Tensor:
+class _LazyTensors:
+    """Dict-like, memory-mapped lazy access to a safetensors file's tensors.
+
+    `load_file()` materializes every tensor in the file at once -- for a 17GB checkpoint,
+    that alone risks OOM before any output is even written. This fetches one tensor at a
+    time via `safe_open`'s mmap-backed `get_tensor`, so peak memory is bounded by whichever
+    tensor (plus its handful of quantization-metadata companions) is currently being
+    processed, not the whole file.
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+        self._keys = set(handle.keys())
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._keys
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def get(self, key: str, default=None):
+        return self._handle.get_tensor(key) if key in self._keys else default
+
+    def __getitem__(self, key: str):
+        return self._handle.get_tensor(key)
+
+
+def _dequantize_tensor(raw, key: str) -> torch.Tensor:
     """Dequantize `raw[key]` using whichever companion metadata is present, or pass it
     through as bf16 if it was never quantized."""
     tensor = raw[key]
@@ -174,7 +241,13 @@ def _dequantize_tensor(raw: dict[str, torch.Tensor], key: str) -> torch.Tensor:
         )
     scale = raw.get(f"{key}_scale")
     if scale is not None:
-        return dequantize_int8_simple(tensor, scale)
+        quant_meta = _read_comfy_quant(raw, key) or {}
+        return dequantize_int8_simple(
+            tensor,
+            scale,
+            convrot=bool(quant_meta.get("convrot", False)),
+            convrot_groupsize=quant_meta.get("convrot_groupsize", DEFAULT_CONVROT_GROUPSIZE),
+        )
     return tensor.to(torch.bfloat16) if tensor.dtype.is_floating_point else tensor
 
 
@@ -201,6 +274,13 @@ def convert_checkpoint(source_path: Path, output_dir: Path) -> Path:
     (via mx.quantize) to fit the converted output on disk; the connector and all non-Linear
     transformer tensors (biases, norms, tables) stay dense bf16.
 
+    KNOWN GAP (verified against a real ComfyUI-exported checkpoint): the source never bundles
+    `text_embedding_projection.*` (the Gemma-3-12B -> DiT text-conditioning projection) under
+    `model.diffusion_model.` -- ComfyUI checkpoints don't carry it there at all, so our
+    connector.safetensors is real but incomplete. The download step for the official
+    connector.safetensors targets this same output directory and overwrites our partial file
+    with the complete one -- by design, not an oversight.
+
     Raises FileNotFoundError if `source_path` doesn't exist, ConversionError for malformed
     quantization metadata.
     """
@@ -208,36 +288,58 @@ def convert_checkpoint(source_path: Path, output_dir: Path) -> Path:
     if not source_path.is_file():
         raise FileNotFoundError(f"Source checkpoint not found: {source_path}")
 
-    try:
-        raw = load_file(str(source_path))
-    except Exception as exc:
-        raise ConversionError(f"failed to read {source_path} as a safetensors checkpoint: {exc}") from exc
-
     transformer: dict[str, mx.array] = {}
     connector: dict[str, mx.array] = {}
 
-    for key in raw:
-        if key.endswith(_QUANT_METADATA_SUFFIXES):
-            continue
-        mapped = remap_key(key)
-        if mapped is None:
-            continue
-        target_key, destination = mapped
+    try:
+        handle_ctx = safe_open(str(source_path), framework="pt")
+    except Exception as exc:
+        raise ConversionError(f"failed to read {source_path} as a safetensors checkpoint: {exc}") from exc
 
-        was_quantized = f"{key}_codebook" in raw or f"{key}_scale" in raw
-        value = _dequantize_tensor(raw, key)
+    with handle_ctx as handle:
+        raw = _LazyTensors(handle)
+        meta = handle.metadata() or {}
 
-        if destination == "connector":
-            connector[target_key] = _to_mx(value)
-            continue
+        for key in raw:
+            if key.endswith(_QUANT_METADATA_SUFFIXES):
+                continue
+            mapped = remap_key(key)
+            if mapped is None:
+                continue
+            target_key, destination = mapped
 
-        if _should_quantize_output(target_key, was_quantized, value):
-            wq, scales, biases = mx.quantize(_to_mx(value), group_size=64, bits=8)
-            transformer[target_key] = wq
-            transformer[f"{target_key.removesuffix('.weight')}.scales"] = scales
-            transformer[f"{target_key.removesuffix('.weight')}.biases"] = biases
-        else:
-            transformer[target_key] = _to_mx(value)
+            was_quantized = f"{key}_codebook" in raw or f"{key}_scale" in raw
+            value = _dequantize_tensor(raw, key)
+
+            if destination == "connector":
+                # load_split_safetensors(path, prefix="connector.") only keeps keys that
+                # already start with "connector." (stripping it on load) -- confirmed
+                # against the real ltx_core_mlx loader source, same class of bug as the
+                # transformer's "transformer." prefix above.
+                arr = _to_mx(value)
+                mx.eval(arr)
+                connector[f"connector.{target_key}"] = arr
+                continue
+
+            # The loaded model wraps the DiT as `self.transformer` -- confirmed against
+            # dgrauet/ltx-2-mlx's own T8 parity test, which strips this exact prefix when
+            # comparing MLX weights back against the upstream PyTorch state dict.
+            prefixed_key = f"transformer.{target_key}"
+            if _should_quantize_output(target_key, was_quantized, value):
+                wq, scales, biases = mx.quantize(_to_mx(value), group_size=64, bits=8)
+                # MLX is lazy by default -- without forcing evaluation here, each of these
+                # arrays keeps its full computation graph (including the dequant's
+                # intermediate float32 buffers) alive until the final save call, so peak
+                # memory scales with the WHOLE checkpoint rather than one tensor at a time.
+                # This is what caused repeated OOM kills on the real 17GB file.
+                mx.eval(wq, scales, biases)
+                transformer[prefixed_key] = wq
+                transformer[f"{prefixed_key.removesuffix('.weight')}.scales"] = scales
+                transformer[f"{prefixed_key.removesuffix('.weight')}.biases"] = biases
+            else:
+                arr = _to_mx(value)
+                mx.eval(arr)
+                transformer[prefixed_key] = arr
 
     if not transformer:
         raise ConversionError(f"no {SOURCE_PREFIX}* tensors found in {source_path} -- wrong checkpoint?")
@@ -247,8 +349,6 @@ def convert_checkpoint(source_path: Path, output_dir: Path) -> Path:
     mx.save_safetensors(str(output_dir / "transformer-dev.safetensors"), transformer)
     mx.save_safetensors(str(output_dir / "connector.safetensors"), connector)
 
-    with safe_open(str(source_path), framework="numpy") as f:
-        meta = f.metadata() or {}
     if "config" in meta:
         (output_dir / "embedded_config.json").write_text(
             json.dumps(json.loads(meta["config"]), indent=2)
