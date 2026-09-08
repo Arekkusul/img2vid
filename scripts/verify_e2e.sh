@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # Real end-to-end check: real model, real generation, real wall-clock time.
-# Not part of `pytest` — this hits actual mlxgen weights and takes minutes.
+# Not part of `pytest` — this hits the converted LTX-2.5 weights and takes minutes.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/env.sh
 
-IMAGE="${1:-tests/fixtures/verify_input.jpg}"
-PROMPT="${2:-the camera slowly pans across the scene as clouds drift and light shifts}"
+MODEL="${IMG2VID_LTX_MODEL:-$HOME/.cache/img2vid/ltx23-model}"
+PROMPT="${1:-a heavy wooden door creaks slowly open}"
 OUTPUT="outputs/verify.mp4"
 
-echo "--- capabilities check (weights present?) ---"
-"$VENV_BIN/mlxgen" capabilities --model AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit >/dev/null
+test -d "$MODEL" || { echo "FAIL: $MODEL not found; run img2vid-ltx-convert first" >&2; exit 1; }
 
-echo "--- generating (this takes minutes) ---"
-time "$VENV_BIN/img2vid" --image "$IMAGE" --prompt "$PROMPT" --output "$OUTPUT" --seed 42
+echo "--- generating (text-to-video, this takes minutes) ---"
+time "$VENV_BIN/img2vid" --model "$MODEL" --prompt "$PROMPT" --output "$OUTPUT" --seed 42
 
 echo "--- structural checks ---"
 test -s "$OUTPUT" || { echo "FAIL: $OUTPUT missing or empty" >&2; exit 1; }

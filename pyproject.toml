@@ -1,9 +1,9 @@
 [project]
 name = "img2vid"
 version = "0.1.0"
-description = "Local image-to-video (Wan2.2) and text-to-image/edit (Krea 2) generation, with Gradio UIs"
+description = "Local text/image-to-video (LTX-2.5) and text-to-image/edit (Krea 2) generation, with Gradio UIs"
 requires-python = ">=3.13"
-dependencies = ["mlx-gen", "gradio", "torch", "safetensors", "mlx"]
+dependencies = ["gradio", "torch", "safetensors", "mlx"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "mypy"]
@@ -13,6 +13,7 @@ img2vid = "img2vid.cli:main"
 img2vid-ui = "img2vid.ui:launch"
 img2vid-image = "img2vid.image_cli:main"
 img2vid-image-ui = "img2vid.image_ui:launch"
+img2vid-studio-ui = "img2vid.studio_ui:launch"
 img2vid-krea-convert = "img2vid.krea_convert:main"
 img2vid-ltx-convert = "img2vid.ltx_convert:main"
 

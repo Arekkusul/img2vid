@@ -6,19 +6,21 @@ from img2vid.generate import DEFAULT_MODEL, GenerationError, generate_video
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="img2vid", description="Generate a video from an image + prompt.")
-    parser.add_argument("--image", required=True, help="Path to the input image")
-    parser.add_argument("--prompt", required=True, help="Text prompt describing the desired motion/scene")
+    parser = argparse.ArgumentParser(
+        prog="img2vid",
+        description="Generate a video from a text prompt (T2V), or a prompt + image (I2V), via LTX-2.5.",
+    )
+    parser.add_argument("--prompt", required=True, help="Text prompt describing the desired scene/motion")
+    parser.add_argument("--image", default=None, help="Optional input image path (enables image-to-video)")
     parser.add_argument("--output", default=None, help="Output video path (default: outputs/generated.mp4)")
-    parser.add_argument("--width", type=int, default=832)
+    parser.add_argument("--width", type=int, default=704)
     parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--frames", type=int, default=81)
-    parser.add_argument("--steps", type=int, default=25)
-    parser.add_argument("--guidance", type=float, default=5.0)
-    parser.add_argument("--flow-shift", type=float, default=3.0)
-    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--frames", "-f", type=int, default=97, help="Must satisfy (frames - 1) %% 8 == 0")
+    parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument("--cfg-scale", type=float, default=3.0)
+    parser.add_argument("--frame-rate", type=float, default=24.0)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", default=DEFAULT_MODEL, type=Path)
     parser.add_argument("--no-low-ram", action="store_true", help="Disable --low-ram (needs more unified memory)")
     return parser
 
@@ -29,16 +31,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         output_path = generate_video(
-            Path(args.image),
             args.prompt,
+            image_path=Path(args.image) if args.image else None,
             output_path=Path(args.output) if args.output else None,
             width=args.width,
             height=args.height,
             frames=args.frames,
             steps=args.steps,
-            guidance=args.guidance,
-            flow_shift=args.flow_shift,
-            fps=args.fps,
+            cfg_scale=args.cfg_scale,
+            frame_rate=args.frame_rate,
             seed=args.seed,
             model=args.model,
             low_ram=not args.no_low_ram,

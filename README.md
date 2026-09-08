@@ -2,43 +2,54 @@
 
 Two independent local generation tools, both on-device via [MLX](https://github.com/ml-explore/mlx)
 — no cloud API, no CUDA required:
-- **Image-to-video**: give it an image + a text prompt, get back a generated video clip.
+- **Text-to-video / image-to-video**: give it a prompt (and optionally a starting image), get
+  back a generated video clip.
 - **Text-to-image / image-edit** (standalone, see below): give it a prompt, get back an image;
   optionally give it a reference image too for editing.
 
+## Combined web UI
+
+`scripts/run_studio_ui.sh` (or `img2vid-studio-ui`) launches both tools in one tabbed Gradio app
+— a "Video" tab and an "Image" tab, so you can switch between them without running two separate
+servers. It's a thin composition (`gr.TabbedInterface`) of the two standalone UIs described
+below, which still work independently if you only need one.
+
 ## Video: Model
 
-[Wan2.2 TI2V-5B](https://huggingface.co/AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit)
-(Alibaba, Apache 2.0), a dense 5B-parameter unified text+image-to-video diffusion model, run
-through [`mlx-gen`](https://github.com/lpalbou/mlx-gen) (MIT license), an MLX-native inference
-runtime. This is the standard open-weight release, unmodified.
+[LTX-2.5](https://github.com/Lightricks/LTX-2) (Lightricks), a 19B-parameter joint audio+video
+diffusion transformer, converted from the user's own ComfyUI-exported fp8 checkpoint to MLX via
+a from-scratch conversion (`src/img2vid/ltx_convert.py`) and run through
+[`ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx) (a separate, `uv`-managed MLX-native
+inference runtime cloned into `ltx-2-mlx-upstream/`).
 
-Why this model/runtime combo: PyTorch+MPS is currently broken for Wan2.2-class video models on
-Apple Silicon (measured: 82 minutes for a 2-second clip via GGUF+ComfyUI+MPS). MLX is the only
-practical local path on Mac hardware today.
+**Unlike a pre-packaged model download, this project's video weights are converted locally from a
+user-supplied checkpoint** — there's no `download_model.sh` step. The source file uses a mixed
+w4a8-codebook + int8-tensorwise quantization scheme (ComfyUI/comfy-kitchen's own format); the
+conversion logic (dequantization, key remapping, MLX re-quantization) was derived by reading the
+real Apache-2.0-licensed `comfy-kitchen` source, not guessed — see `WORKING-CONTEXT.md` for the
+one real dequantization bug this surfaced (a missing Hadamard rotation on ~57% of the quantized
+tensors) and how it was found.
 
-### Disk & memory
+Why MLX: PyTorch+MPS is currently broken/unusably slow for this class of video model on Apple
+Silicon. MLX is the only practical local path on Mac hardware today.
 
-- Model weights (q8 package): ~16.9GB, cached at `~/.cache/huggingface/hub` (shared across
-  projects, not project-local).
-- Quantization saves disk only — `mlx-gen` dequantizes to BF16 at load time, so RAM usage is not
-  reduced by using q8 over bf16.
-- Default generation settings (`832x480`, 81 frames, `--low-ram`) are chosen to stay well within
-  64GB unified memory. Larger canvases (up to the model's native `1280x704`) are possible with
-  more headroom but are not the default — see `docs/upgrading.md`-style notes below.
+### Two separate venvs
 
-### Upgrading to a larger model
-
-Wan2.2 I2V-A14B (MoE, ~39.5GB via the same `mlx-gen` runtime) gives higher quality but consumes
-nearly all free disk on a machine with ~43GB free. Not installed by default. To use it, download
-via `mlxgen download --model AbstractFramework/wan2.2-i2v-a14b-diffusers-8bit` and pass
-`--model` to override the default in `img2vid generate` / the UI.
-
-## Video: Setup
+`ltx-2-mlx-upstream/` is its own `uv` workspace with its own venv — a different dependency set
+than this project's own `.venv` (pure MLX, no torch; the conversion script is the only thing that
+needs torch, to read the ComfyUI-format source file). It's gitignored; if missing:
 
 ```sh
-scripts/setup.sh          # creates .venv, installs deps (handles a local Homebrew pyexpat bug)
-scripts/download_model.sh # downloads the ~17GB model weights (checks free disk first)
+cd ltx-2-mlx-upstream && uv sync
+```
+
+### Setup
+
+```sh
+scripts/setup.sh                                    # this project's own .venv (Krea + conversion tooling)
+cd ltx-2-mlx-upstream && uv sync && cd ..            # the LTX runtime's own venv
+img2vid-ltx-convert --source ~/Downloads/your-checkpoint.safetensors \
+  --output-dir ~/.cache/img2vid/ltx23-model          # one-time conversion of your own checkpoint
 ```
 
 ## Video: Usage
@@ -48,7 +59,12 @@ Activate the environment first (needed once per shell session):
 source scripts/env.sh && source .venv/bin/activate
 ```
 
-CLI:
+CLI — text-to-video:
+```sh
+img2vid --prompt "a heavy wooden door creaks slowly open" --output outputs/clip.mp4
+```
+
+CLI — image-to-video (add `--image`):
 ```sh
 img2vid --image photo.jpg --prompt "the person waves at the camera" --output outputs/clip.mp4
 ```
@@ -56,15 +72,18 @@ img2vid --image photo.jpg --prompt "the person waves at the camera" --output out
 Web UI:
 ```sh
 scripts/run_ui.sh
-# open the printed local URL (http://127.0.0.1:7860), upload an image, enter a prompt, click Generate
+# open the printed local URL (http://127.0.0.1:7860); leave the image blank for text-to-video,
+# or upload one for image-to-video, enter a prompt, click Generate
 ```
 
 ### Verified performance (measured on this machine: M4 Pro, 64GB unified memory)
 
-Default settings (`832x480`, 81 frames, 25 steps, `--low-ram`): **~17.5 minutes** wall clock,
-GPU (Metal via MLX) at 98-100% utilization throughout. Output: 4.05s clip at 20fps. A minimal
-smoke-test run (9 frames, 4 steps) took ~79s — useful for quickly checking the pipeline works
-before committing to a full-length generation.
+Only the dev transformer + CFG one-stage pipeline is available (this checkpoint has no distilled
+LoRA fused in): `--one-stage`, always used by `generate_video()`.
+- T2V, 256x256, 9 frames, 8 steps: 74s.
+- I2V, 320x320, 25 frames, 16 steps: 232s (~3m52s) — real, coherent motion (verified: a
+  head-turn matching the prompt, identity preserved throughout the clip).
+- `--frames` must satisfy `(frames - 1) % 8 == 0` (LTX's latent frame grid).
 
 ## Image: Model
 
@@ -132,6 +151,6 @@ ruff check .
 mypy src
 ```
 
-Tests mock the `mlxgen` subprocess entirely — no GPU/model weights needed to run the suite.
-End-to-end verification (real model, real generation) is a separate manual step; see
+Tests mock the `ltx-2-mlx`/`krea-gen` subprocesses entirely — no GPU/model weights needed to run
+the suite. End-to-end verification (real model, real generation) is a separate manual step; see
 `scripts/verify_e2e.sh`.
