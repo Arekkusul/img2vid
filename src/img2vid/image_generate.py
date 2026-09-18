@@ -87,7 +87,8 @@ def generate_image(
         if not Path(lora_path).is_file():
             raise FileNotFoundError(
                 f"Distilled LoRA not found: {lora_path} "
-                "(train it first -- see docs/krea-distillation-research.md)"
+                "(run scripts/download_distill_lora.sh to fetch the published adapter, "
+                "or train your own -- see docs/krea-distillation-research.md)"
             )
 
     snapshot = Path(snapshot)

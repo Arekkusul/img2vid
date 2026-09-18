@@ -115,6 +115,7 @@ scripts/build_krea_gen.sh              # cargo build --release (first build comp
 scripts/convert_krea_model.sh          # converts ~/Downloads/imagemodelfp8.safetensors by default
 scripts/download_krea_components.sh    # text encoder + VAE from the gated krea/Krea-2-Raw repo
                                         # (needs `hf auth login` + accepting the license on the model page first)
+scripts/download_distill_lora.sh       # optional: the published 2x-speedup LoRA, for --distilled
 ```
 
 ### Usage
