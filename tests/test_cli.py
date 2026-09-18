@@ -63,3 +63,17 @@ def test_frame_rate_and_cfg_scale_forwarded(tmp_path):
         main(["--prompt", "a prompt", "--frame-rate", "30", "--cfg-scale", "4.5", "--output", str(output_path)])
     assert mock_gen.call_args.kwargs["frame_rate"] == 30.0
     assert mock_gen.call_args.kwargs["cfg_scale"] == 4.5
+
+
+def test_dev_flag_defaults_to_false(tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.cli.generate_video", return_value=output_path) as mock_gen:
+        main(["--prompt", "a prompt", "--output", str(output_path)])
+    assert mock_gen.call_args.kwargs["dev"] is False
+
+
+def test_dev_flag_forwarded_when_set(tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.cli.generate_video", return_value=output_path) as mock_gen:
+        main(["--prompt", "a prompt", "--dev", "--output", str(output_path)])
+    assert mock_gen.call_args.kwargs["dev"] is True

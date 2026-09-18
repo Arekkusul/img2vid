@@ -38,6 +38,7 @@ def generate_video(
     frame_rate: float = 24.0,
     seed: int | None = None,
     model: Path = DEFAULT_MODEL,
+    dev: bool = False,
     low_ram: bool = True,
     ltx_bin: str = DEFAULT_LTX_BIN,
     timeout: float = 1800,
@@ -45,10 +46,15 @@ def generate_video(
     """Generate a video from a text prompt (T2V), or a prompt + image (I2V), via LTX-2.5.
 
     Text-to-video when `image_path` is None; image-to-video (single-anchor, frame 0) when
-    it's set -- mirrors `image_generate.py`'s optional-edit-image pattern. Always uses the
-    dev transformer + CFG one-stage pipeline (`--one-stage`): this project's converted
-    checkpoint only carries the dev weights (no distilled LoRA fusion), per the user's own
-    safetensors file.
+    it's set -- mirrors `image_generate.py`'s optional-edit-image pattern.
+
+    Defaults to the fast, CFG-free distilled pipeline (`--distilled`, needs
+    `transformer-distilled.safetensors` -- see `scripts/fuse_distilled_lora.py`, which fuses
+    the community distilled LoRA onto this project's own converted dev weights, not someone
+    else's checkpoint). Measured ~6x faster than `dev=True` at equal quality (36s vs 232s at
+    320x320x25 frames). `dev=True` uses the slower dev transformer + CFG one-stage pipeline
+    (`--one-stage`, needs only `transformer-dev.safetensors`) -- the only path available
+    before the LoRA was fused, kept as a fallback.
 
     Raises FileNotFoundError/ValueError for bad inputs (fail fast, before spawning a
     subprocess), or GenerationError if ltx-2-mlx fails, hangs past `timeout` seconds, or
@@ -66,6 +72,19 @@ def generate_video(
             f"LTX model directory not found: {model} (run img2vid-ltx-convert first)"
         )
 
+    required_transformer = "transformer-dev.safetensors" if dev else "transformer-distilled.safetensors"
+    if not (model / required_transformer).is_file():
+        if dev:
+            raise FileNotFoundError(
+                f"{model / required_transformer} not found (run img2vid-ltx-convert first)"
+            )
+        raise FileNotFoundError(
+            f"{model / required_transformer} not found -- the fast default path needs the "
+            "distilled LoRA fused onto your dev weights first: run "
+            "scripts/fuse_distilled_lora.py, or pass dev=True to use the slower --one-stage "
+            "path (needs only transformer-dev.safetensors)"
+        )
+
     if image_path is not None:
         image_path = Path(image_path)
         if not image_path.is_file():
@@ -78,15 +97,16 @@ def generate_video(
         ltx_bin, "generate",
         "--model", str(model),
         "--prompt", prompt,
-        "--one-stage",
         "--width", str(width),
         "--height", str(height),
         "-f", str(frames),
-        "--steps", str(steps),
-        "--cfg-scale", str(cfg_scale),
         "--frame-rate", str(frame_rate),
         "--output", str(output_path),
     ]
+    if dev:
+        argv += ["--one-stage", "--steps", str(steps), "--cfg-scale", str(cfg_scale)]
+    else:
+        argv.append("--distilled")
     if image_path is not None:
         argv += ["--image", str(image_path)]
     if seed is not None:

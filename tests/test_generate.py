@@ -17,6 +17,8 @@ def image_path(tmp_path):
 def model_dir(tmp_path):
     d = tmp_path / "ltx-model"
     d.mkdir()
+    (d / "transformer-distilled.safetensors").write_bytes(b"fake")
+    (d / "transformer-dev.safetensors").write_bytes(b"fake")
     return d
 
 
@@ -66,7 +68,54 @@ def test_t2v_omits_image_flag(model_dir, tmp_path):
         generate_video("a prompt", output_path=output_path, model=model_dir)
     argv = mock_run.call_args.args[0]
     assert "--image" not in argv
+
+
+def test_default_mode_uses_fast_distilled_path(model_dir, tmp_path):
+    # The fused transformer-distilled.safetensors (built from the user's own dev weights +
+    # the community distilled LoRA, see fuse_distilled_lora.py) is ~6x faster than --one-stage
+    # at equal quality -- confirmed via a real measured run (36s vs 232s at 320x320x25 frames).
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video("a prompt", output_path=output_path, model=model_dir)
+    argv = mock_run.call_args.args[0]
+    assert "--distilled" in argv
+    assert "--one-stage" not in argv
+    # Distilled uses its own built-in 8+3 step schedule and is CFG-free -- these don't apply.
+    assert "--steps" not in argv
+    assert "--cfg-scale" not in argv
+
+
+def test_dev_mode_uses_one_stage_with_steps_and_cfg(model_dir, tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video("a prompt", output_path=output_path, model=model_dir, dev=True, steps=20, cfg_scale=4.0)
+    argv = mock_run.call_args.args[0]
     assert "--one-stage" in argv
+    assert "--distilled" not in argv
+    assert "--steps" in argv
+    assert "20" in argv
+    assert "--cfg-scale" in argv
+    assert "4.0" in argv
+
+
+def test_rejects_missing_distilled_transformer_before_invoking_subprocess(tmp_path):
+    model_dir = tmp_path / "ltx-model"
+    model_dir.mkdir()
+    (model_dir / "transformer-dev.safetensors").write_bytes(b"fake")
+    with patch("img2vid.generate.subprocess.run") as mock_run:
+        with pytest.raises(FileNotFoundError, match="transformer-distilled"):
+            generate_video("a prompt", output_path=tmp_path / "out.mp4", model=model_dir)
+    mock_run.assert_not_called()
+
+
+def test_rejects_missing_dev_transformer_before_invoking_subprocess_in_dev_mode(tmp_path):
+    model_dir = tmp_path / "ltx-model"
+    model_dir.mkdir()
+    (model_dir / "transformer-distilled.safetensors").write_bytes(b"fake")
+    with patch("img2vid.generate.subprocess.run") as mock_run:
+        with pytest.raises(FileNotFoundError, match="transformer-dev"):
+            generate_video("a prompt", output_path=tmp_path / "out.mp4", model=model_dir, dev=True)
+    mock_run.assert_not_called()
 
 
 def test_i2v_includes_image_flag(image_path, model_dir, tmp_path):
@@ -151,6 +200,7 @@ def test_frames_height_width_steps_cfg_frame_rate_forwarded(model_dir, tmp_path)
             "a prompt",
             output_path=output_path,
             model=model_dir,
+            dev=True,
             width=320,
             height=320,
             frames=25,
@@ -163,6 +213,18 @@ def test_frames_height_width_steps_cfg_frame_rate_forwarded(model_dir, tmp_path)
     assert "25" in argv
     assert "16" in argv
     assert "4.0" in argv
+    assert "30.0" in argv
+
+
+def test_frame_rate_forwarded_in_distilled_mode_too(model_dir, tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video(
+            "a prompt", output_path=output_path, model=model_dir, width=320, height=320, frames=25, frame_rate=30.0
+        )
+    argv = mock_run.call_args.args[0]
+    assert "320" in argv
+    assert "25" in argv
     assert "30.0" in argv
 
 

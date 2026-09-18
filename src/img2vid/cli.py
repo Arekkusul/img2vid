@@ -21,6 +21,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-rate", type=float, default=24.0)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--model", default=DEFAULT_MODEL, type=Path)
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help=(
+            "Use the slower dev transformer + CFG pipeline instead of the fast distilled "
+            "default (~6x slower, needs only transformer-dev.safetensors — no fused LoRA "
+            "required). --steps/--cfg-scale only apply in this mode."
+        ),
+    )
     parser.add_argument("--no-low-ram", action="store_true", help="Disable --low-ram (needs more unified memory)")
     return parser
 
@@ -42,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
             frame_rate=args.frame_rate,
             seed=args.seed,
             model=args.model,
+            dev=args.dev,
             low_ram=not args.no_low_ram,
         )
     except (FileNotFoundError, ValueError) as exc:
