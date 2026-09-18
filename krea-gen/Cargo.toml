@@ -7,6 +7,10 @@ description = "CLI wrapper around mlx-gen-krea for img2vid's standalone Krea 2 i
 [dependencies]
 mlx-gen = { git = "https://github.com/SceneWorks/mlx-gen" }
 mlx-gen-krea = { git = "https://github.com/SceneWorks/mlx-gen" }
+# Pinned to the EXACT same fork+rev mlx-gen itself depends on (see its own Cargo.toml) so cargo
+# unifies on one mlx-rs build -- a mismatched rev here would silently produce a second, incompatible
+# build of the same crate name.
+mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "38e1cc1730a11b1e40c2c8ecda01606763a12d51" }
 # Standard, widely-used Rust argv parser -- mlx-gen-krea's own examples take args via env vars
 # (not meant as a real CLI), so this is genuinely new surface for us, not duplicated capability.
 clap = { version = "4", features = ["derive"] }
@@ -17,3 +21,7 @@ image = "0.25"
 [[bin]]
 name = "krea-gen"
 path = "src/main.rs"
+
+[[bin]]
+name = "distill-train"
+path = "src/bin/distill_train.rs"

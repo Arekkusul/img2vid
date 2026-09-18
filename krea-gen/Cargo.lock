@@ -834,6 +834,7 @@ dependencies = [
  "image",
  "mlx-gen",
  "mlx-gen-krea",
+ "pmetal-mlx-rs",
 ]
 
 [[package]]
