@@ -52,6 +52,20 @@ img2vid-ltx-convert --source ~/Downloads/your-checkpoint.safetensors \
   --output-dir ~/.cache/img2vid/ltx23-model          # one-time conversion of your own checkpoint
 ```
 
+By default `generate_video()` needs a fused `transformer-distilled.safetensors` (the fast path
+-- see below); build it once from your own converted `transformer-dev.safetensors` plus
+Lightricks' official distilled LoRA (a **separately gated** repo -- being logged in to Hugging
+Face isn't enough, this specific repo needs its own access request approved first):
+
+```sh
+scripts/download_ltx_distilled_lora.sh              # needs its own access request approved at
+                                                      # huggingface.co/Lightricks/LTX-2.5 first
+scripts/fuse_distilled_lora.sh --lora ~/.cache/img2vid/ltx-2.5-distilled-lora-450-bf16.safetensors
+```
+
+(Or pass `--dev` to `img2vid`/check the "Use dev model" box in the UI to skip this and always
+run the slower, full-CFG dense weights instead.)
+
 ## Video: Usage
 
 Activate the environment first (needed once per shell session):
