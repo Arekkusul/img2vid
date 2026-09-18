@@ -141,6 +141,21 @@ corruption and banding artifacts. At the model's documented **52 steps, guidance
 clean 1024x1024 photorealistic image in **~41 minutes**, GPU at 99% utilization throughout. Use a
 low step count (e.g. 8-20) only for fast pipeline smoke-tests, not for real output.
 
+### Distillation: a 2x-faster LoRA, trained on this hardware
+
+Krea only ships an official few-step model (Turbo) as a *separately, expensively trained*
+checkpoint — not something derivable from Raw via a LoRA. Rather than wait on that, this project
+includes a self-designed single-stage step-distillation trainer
+(`krea-gen/src/bin/distill_train.rs`, progressive distillation per Salimans & Ho 2022, adapted
+to need no second resident model copy) that trains a real LoRA cutting the 52-step baseline down
+to **26 steps at matching quality**, entirely on a single Apple Silicon Mac.
+
+The trained LoRA is published at
+**[huggingface.co/Arekkusul/krea-2-raw-distill-lora](https://huggingface.co/Arekkusul/krea-2-raw-distill-lora)**
+— use it directly via `img2vid-image --distilled` (auto-selects 26 steps + the LoRA), or train
+your own on your own weights following `docs/krea-distillation-research.md` (full method,
+research into 5 rejected published alternatives, and honest results/limitations).
+
 ## Development
 
 ```sh
