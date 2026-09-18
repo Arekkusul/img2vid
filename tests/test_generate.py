@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from img2vid.generate import GenerationError, _default_mlxgen_bin, generate_video
+from img2vid.generate import GenerationError, _default_ltx_bin, generate_video
 
 
 @pytest.fixture
@@ -13,150 +13,248 @@ def image_path(tmp_path):
     return p
 
 
+@pytest.fixture
+def model_dir(tmp_path):
+    d = tmp_path / "ltx-model"
+    d.mkdir()
+    (d / "transformer-distilled.safetensors").write_bytes(b"fake")
+    (d / "transformer-dev.safetensors").write_bytes(b"fake")
+    return d
+
+
 def _mock_success(output_path: Path, stdout: str = "done"):
     def _run(argv, **kwargs):
         output_path.write_bytes(b"fake-video-bytes")
         return MagicMock(returncode=0, stdout=stdout, stderr="")
+
     return _run
 
 
-def test_rejects_missing_image_before_invoking_subprocess(tmp_path):
+def test_rejects_empty_prompt_before_invoking_subprocess(model_dir, tmp_path):
+    with patch("img2vid.generate.subprocess.run") as mock_run:
+        with pytest.raises(ValueError):
+            generate_video("   ", output_path=tmp_path / "out.mp4", model=model_dir)
+    mock_run.assert_not_called()
+
+
+def test_rejects_missing_model_dir_before_invoking_subprocess(tmp_path):
+    missing = tmp_path / "no-such-model"
+    with patch("img2vid.generate.subprocess.run") as mock_run:
+        with pytest.raises(FileNotFoundError, match="img2vid-ltx-convert"):
+            generate_video("a prompt", output_path=tmp_path / "out.mp4", model=missing)
+    mock_run.assert_not_called()
+
+
+def test_rejects_missing_image_before_invoking_subprocess(model_dir, tmp_path):
     missing = tmp_path / "nope.jpg"
     with patch("img2vid.generate.subprocess.run") as mock_run:
         with pytest.raises(FileNotFoundError):
-            generate_video(missing, "a prompt", output_path=tmp_path / "out.mp4")
+            generate_video(
+                "a prompt", image_path=missing, output_path=tmp_path / "out.mp4", model=model_dir
+            )
     mock_run.assert_not_called()
 
 
-@pytest.mark.parametrize("prompt", ["", "   ", "\n\t"])
-def test_rejects_empty_prompt_before_invoking_subprocess(image_path, tmp_path, prompt):
+def test_rejects_frame_count_not_matching_grid(model_dir, tmp_path):
     with patch("img2vid.generate.subprocess.run") as mock_run:
-        with pytest.raises(ValueError):
-            generate_video(image_path, prompt, output_path=tmp_path / "out.mp4")
+        with pytest.raises(ValueError, match="frames"):
+            generate_video("a prompt", output_path=tmp_path / "out.mp4", model=model_dir, frames=50)
     mock_run.assert_not_called()
 
 
-def test_raises_generation_error_with_stderr_on_nonzero_exit(image_path, tmp_path):
+def test_t2v_omits_image_flag(model_dir, tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video("a prompt", output_path=output_path, model=model_dir)
+    argv = mock_run.call_args.args[0]
+    assert "--image" not in argv
+
+
+def test_default_mode_uses_fast_distilled_path(model_dir, tmp_path):
+    # The fused transformer-distilled.safetensors (built from the user's own dev weights +
+    # the community distilled LoRA, see fuse_distilled_lora.py) is ~6x faster than --one-stage
+    # at equal quality -- confirmed via a real measured run (36s vs 232s at 320x320x25 frames).
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video("a prompt", output_path=output_path, model=model_dir)
+    argv = mock_run.call_args.args[0]
+    assert "--distilled" in argv
+    assert "--one-stage" not in argv
+    # Distilled uses its own built-in 8+3 step schedule and is CFG-free -- these don't apply.
+    assert "--steps" not in argv
+    assert "--cfg-scale" not in argv
+
+
+def test_dev_mode_uses_one_stage_with_steps_and_cfg(model_dir, tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video("a prompt", output_path=output_path, model=model_dir, dev=True, steps=20, cfg_scale=4.0)
+    argv = mock_run.call_args.args[0]
+    assert "--one-stage" in argv
+    assert "--distilled" not in argv
+    assert "--steps" in argv
+    assert "20" in argv
+    assert "--cfg-scale" in argv
+    assert "4.0" in argv
+
+
+def test_rejects_missing_distilled_transformer_before_invoking_subprocess(tmp_path):
+    model_dir = tmp_path / "ltx-model"
+    model_dir.mkdir()
+    (model_dir / "transformer-dev.safetensors").write_bytes(b"fake")
+    with patch("img2vid.generate.subprocess.run") as mock_run:
+        with pytest.raises(FileNotFoundError, match="transformer-distilled"):
+            generate_video("a prompt", output_path=tmp_path / "out.mp4", model=model_dir)
+    mock_run.assert_not_called()
+
+
+def test_rejects_missing_dev_transformer_before_invoking_subprocess_in_dev_mode(tmp_path):
+    model_dir = tmp_path / "ltx-model"
+    model_dir.mkdir()
+    (model_dir / "transformer-distilled.safetensors").write_bytes(b"fake")
+    with patch("img2vid.generate.subprocess.run") as mock_run:
+        with pytest.raises(FileNotFoundError, match="transformer-dev"):
+            generate_video("a prompt", output_path=tmp_path / "out.mp4", model=model_dir, dev=True)
+    mock_run.assert_not_called()
+
+
+def test_i2v_includes_image_flag(image_path, model_dir, tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video("a prompt", image_path=image_path, output_path=output_path, model=model_dir)
+    argv = mock_run.call_args.args[0]
+    assert "--image" in argv
+    assert str(image_path) in argv
+
+
+def test_raises_generation_error_with_stderr_on_nonzero_exit(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="mlxgen: boom")
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="ltx-2-mlx: boom")
         with pytest.raises(GenerationError, match="boom"):
-            generate_video(image_path, "a prompt", output_path=output_path)
+            generate_video("a prompt", output_path=output_path, model=model_dir)
 
 
-def test_raises_when_exit_zero_but_output_file_missing(image_path, tmp_path):
+def test_raises_when_exit_zero_but_output_file_missing(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="done", stderr="")
         with pytest.raises(GenerationError, match="output file"):
-            generate_video(image_path, "a prompt", output_path=output_path)
+            generate_video("a prompt", output_path=output_path, model=model_dir)
 
 
-def test_raises_when_output_file_exists_but_empty(image_path, tmp_path):
+def test_raises_when_output_file_exists_but_empty(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     output_path.write_bytes(b"")
     with patch("img2vid.generate.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="done", stderr="")
         with pytest.raises(GenerationError, match="empty"):
-            generate_video(image_path, "a prompt", output_path=output_path)
+            generate_video("a prompt", output_path=output_path, model=model_dir)
 
 
-def test_returns_output_path_on_success(image_path, tmp_path):
+def test_returns_output_path_on_success(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)):
-        result = generate_video(image_path, "a prompt", output_path=output_path)
+        result = generate_video("a prompt", output_path=output_path, model=model_dir)
     assert result == output_path
     assert result.stat().st_size > 0
 
 
-def test_seed_omitted_from_argv_when_none(image_path, tmp_path):
+def test_seed_omitted_from_argv_when_none(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
-        generate_video(image_path, "a prompt", output_path=output_path, seed=None)
+        generate_video("a prompt", output_path=output_path, model=model_dir, seed=None)
     argv = mock_run.call_args.args[0]
     assert "--seed" not in argv
 
 
-def test_seed_included_when_set(image_path, tmp_path):
+def test_seed_included_when_set(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
-        generate_video(image_path, "a prompt", output_path=output_path, seed=42)
+        generate_video("a prompt", output_path=output_path, model=model_dir, seed=42)
     argv = mock_run.call_args.args[0]
     assert "--seed" in argv
     assert "42" in argv
 
 
-def test_low_ram_present_by_default(image_path, tmp_path):
+def test_low_ram_present_by_default(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
-        generate_video(image_path, "a prompt", output_path=output_path)
+        generate_video("a prompt", output_path=output_path, model=model_dir)
     argv = mock_run.call_args.args[0]
     assert "--low-ram" in argv
 
 
-def test_low_ram_absent_when_disabled(image_path, tmp_path):
+def test_low_ram_absent_when_disabled(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
-        generate_video(image_path, "a prompt", output_path=output_path, low_ram=False)
+        generate_video("a prompt", output_path=output_path, model=model_dir, low_ram=False)
     argv = mock_run.call_args.args[0]
     assert "--low-ram" not in argv
 
 
-def test_env_contains_dyld_library_path(image_path, tmp_path):
+def test_frames_height_width_steps_cfg_frame_rate_forwarded(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
-        generate_video(image_path, "a prompt", output_path=output_path)
-    env = mock_run.call_args.kwargs["env"]
-    assert env["DYLD_LIBRARY_PATH"] == "/opt/homebrew/opt/expat/lib"
+        generate_video(
+            "a prompt",
+            output_path=output_path,
+            model=model_dir,
+            dev=True,
+            width=320,
+            height=320,
+            frames=25,
+            steps=16,
+            cfg_scale=4.0,
+            frame_rate=30.0,
+        )
+    argv = mock_run.call_args.args[0]
+    assert "320" in argv
+    assert "25" in argv
+    assert "16" in argv
+    assert "4.0" in argv
+    assert "30.0" in argv
 
 
-def test_default_mlxgen_bin_prefers_sibling_of_executable(tmp_path):
-    fake_venv_bin = tmp_path / "bin"
-    fake_venv_bin.mkdir()
-    fake_python = fake_venv_bin / "python"
-    fake_python.write_text("")
-    fake_mlxgen = fake_venv_bin / "mlxgen"
-    fake_mlxgen.write_text("")
-
-    assert _default_mlxgen_bin(str(fake_python)) == str(fake_mlxgen)
-
-
-def test_default_mlxgen_bin_falls_back_to_path_lookup_when_no_sibling(tmp_path):
-    fake_venv_bin = tmp_path / "bin"
-    fake_venv_bin.mkdir()
-    fake_python = fake_venv_bin / "python"
-    fake_python.write_text("")
-
-    assert _default_mlxgen_bin(str(fake_python)) == "mlxgen"
+def test_frame_rate_forwarded_in_distilled_mode_too(model_dir, tmp_path):
+    output_path = tmp_path / "out.mp4"
+    with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_video(
+            "a prompt", output_path=output_path, model=model_dir, width=320, height=320, frames=25, frame_rate=30.0
+        )
+    argv = mock_run.call_args.args[0]
+    assert "320" in argv
+    assert "25" in argv
+    assert "30.0" in argv
 
 
-def test_timeout_raises_generation_error(image_path, tmp_path):
+def test_timeout_raises_generation_error(model_dir, tmp_path):
     import subprocess as sp
 
     output_path = tmp_path / "out.mp4"
     with patch(
         "img2vid.generate.subprocess.run",
-        side_effect=sp.TimeoutExpired(cmd="mlxgen", timeout=5),
+        side_effect=sp.TimeoutExpired(cmd="ltx-2-mlx", timeout=5),
     ):
         with pytest.raises(GenerationError, match="did not finish"):
-            generate_video(image_path, "a prompt", output_path=output_path, timeout=5)
+            generate_video("a prompt", output_path=output_path, model=model_dir, timeout=5)
 
 
-def test_timeout_forwarded_to_subprocess_run(image_path, tmp_path):
+def test_timeout_forwarded_to_subprocess_run(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
-        generate_video(image_path, "a prompt", output_path=output_path, timeout=42)
+        generate_video("a prompt", output_path=output_path, model=model_dir, timeout=42)
     assert mock_run.call_args.kwargs["timeout"] == 42
 
 
-def test_missing_mlxgen_binary_gives_actionable_message(image_path, tmp_path):
+def test_missing_ltx_binary_gives_actionable_message(model_dir, tmp_path):
     output_path = tmp_path / "out.mp4"
     with patch("img2vid.generate.subprocess.run", side_effect=FileNotFoundError()):
-        with pytest.raises(GenerationError, match="scripts/setup.sh"):
-            generate_video(image_path, "a prompt", output_path=output_path)
+        with pytest.raises(GenerationError, match="ltx-2-mlx-upstream"):
+            generate_video("a prompt", output_path=output_path, model=model_dir)
 
 
-def test_default_output_path_derived_when_not_given(image_path, tmp_path, monkeypatch):
+def test_default_output_path_derived_when_not_given(model_dir, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     def _run(argv, **kwargs):
@@ -165,6 +263,19 @@ def test_default_output_path_derived_when_not_given(image_path, tmp_path, monkey
         return MagicMock(returncode=0, stdout="done", stderr="")
 
     with patch("img2vid.generate.subprocess.run", side_effect=_run):
-        result = generate_video(image_path, "a prompt")
+        result = generate_video("a prompt", model=model_dir)
     assert result.exists()
-    assert result.suffix == ".mp4"
+
+
+def test_default_ltx_bin_prefers_upstream_venv(tmp_path):
+    repo_root = tmp_path
+    bin_dir = repo_root / "ltx-2-mlx-upstream" / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    fake_bin = bin_dir / "ltx-2-mlx"
+    fake_bin.write_text("")
+
+    assert _default_ltx_bin(repo_root) == str(fake_bin)
+
+
+def test_default_ltx_bin_falls_back_to_path_lookup_when_missing(tmp_path):
+    assert _default_ltx_bin(tmp_path) == "ltx-2-mlx"

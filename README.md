@@ -1,52 +1,70 @@
 # img2vid
 
-Local image-to-video generation: give it an image + a text prompt, get back a generated
-video clip. Runs entirely on-device via [MLX](https://github.com/ml-explore/mlx) — no cloud
-API, no CUDA required.
+Two independent local generation tools, both on-device via [MLX](https://github.com/ml-explore/mlx)
+— no cloud API, no CUDA required:
+- **Text-to-video / image-to-video**: give it a prompt (and optionally a starting image), get
+  back a generated video clip.
+- **Text-to-image / image-edit** (standalone, see below): give it a prompt, get back an image;
+  optionally give it a reference image too for editing.
 
-## Model
+## Combined web UI
 
-[Wan2.2 TI2V-5B](https://huggingface.co/AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit)
-(Alibaba, Apache 2.0), a dense 5B-parameter unified text+image-to-video diffusion model, run
-through [`mlx-gen`](https://github.com/lpalbou/mlx-gen) (MIT license), an MLX-native inference
-runtime. This is the standard open-weight release, unmodified.
+`scripts/run_studio_ui.sh` (or `img2vid-studio-ui`) launches both tools in one tabbed Gradio app
+— a "Video" tab and an "Image" tab, so you can switch between them without running two separate
+servers. It's a thin composition (`gr.TabbedInterface`) of the two standalone UIs described
+below, which still work independently if you only need one.
 
-Why this model/runtime combo: PyTorch+MPS is currently broken for Wan2.2-class video models on
-Apple Silicon (measured: 82 minutes for a 2-second clip via GGUF+ComfyUI+MPS). MLX is the only
-practical local path on Mac hardware today.
+## Video: Model
 
-### Disk & memory
+[LTX-2.5](https://github.com/Lightricks/LTX-2) (Lightricks), a 19B-parameter joint audio+video
+diffusion transformer, converted from the user's own ComfyUI-exported fp8 checkpoint to MLX via
+a from-scratch conversion (`src/img2vid/ltx_convert.py`) and run through
+[`ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx) (a separate, `uv`-managed MLX-native
+inference runtime cloned into `ltx-2-mlx-upstream/`).
 
-- Model weights (q8 package): ~16.9GB, cached at `~/.cache/huggingface/hub` (shared across
-  projects, not project-local).
-- Quantization saves disk only — `mlx-gen` dequantizes to BF16 at load time, so RAM usage is not
-  reduced by using q8 over bf16.
-- Default generation settings (`832x480`, 81 frames, `--low-ram`) are chosen to stay well within
-  64GB unified memory. Larger canvases (up to the model's native `1280x704`) are possible with
-  more headroom but are not the default — see `docs/upgrading.md`-style notes below.
+**Unlike a pre-packaged model download, this project's video weights are converted locally from a
+user-supplied checkpoint** — there's no `download_model.sh` step. The source file uses a mixed
+w4a8-codebook + int8-tensorwise quantization scheme (ComfyUI/comfy-kitchen's own format); the
+conversion logic (dequantization, key remapping, MLX re-quantization) was derived by reading the
+real Apache-2.0-licensed `comfy-kitchen` source, not guessed — see `WORKING-CONTEXT.md` for the
+one real dequantization bug this surfaced (a missing Hadamard rotation on ~57% of the quantized
+tensors) and how it was found.
 
-### Upgrading to a larger model
+Why MLX: PyTorch+MPS is currently broken/unusably slow for this class of video model on Apple
+Silicon. MLX is the only practical local path on Mac hardware today.
 
-Wan2.2 I2V-A14B (MoE, ~39.5GB via the same `mlx-gen` runtime) gives higher quality but consumes
-nearly all free disk on a machine with ~43GB free. Not installed by default. To use it, download
-via `mlxgen download --model AbstractFramework/wan2.2-i2v-a14b-diffusers-8bit` and pass
-`--model` to override the default in `img2vid generate` / the UI.
+### Two separate venvs
 
-## Setup
+`ltx-2-mlx-upstream/` is its own `uv` workspace with its own venv — a different dependency set
+than this project's own `.venv` (pure MLX, no torch; the conversion script is the only thing that
+needs torch, to read the ComfyUI-format source file). It's gitignored; if missing:
 
 ```sh
-scripts/setup.sh          # creates .venv, installs deps (handles a local Homebrew pyexpat bug)
-scripts/download_model.sh # downloads the ~17GB model weights (checks free disk first)
+cd ltx-2-mlx-upstream && uv sync
 ```
 
-## Usage
+### Setup
+
+```sh
+scripts/setup.sh                                    # this project's own .venv (Krea + conversion tooling)
+cd ltx-2-mlx-upstream && uv sync && cd ..            # the LTX runtime's own venv
+img2vid-ltx-convert --source ~/Downloads/your-checkpoint.safetensors \
+  --output-dir ~/.cache/img2vid/ltx23-model          # one-time conversion of your own checkpoint
+```
+
+## Video: Usage
 
 Activate the environment first (needed once per shell session):
 ```sh
 source scripts/env.sh && source .venv/bin/activate
 ```
 
-CLI:
+CLI — text-to-video:
+```sh
+img2vid --prompt "a heavy wooden door creaks slowly open" --output outputs/clip.mp4
+```
+
+CLI — image-to-video (add `--image`):
 ```sh
 img2vid --image photo.jpg --prompt "the person waves at the camera" --output outputs/clip.mp4
 ```
@@ -54,15 +72,89 @@ img2vid --image photo.jpg --prompt "the person waves at the camera" --output out
 Web UI:
 ```sh
 scripts/run_ui.sh
-# open the printed local URL (http://127.0.0.1:7860), upload an image, enter a prompt, click Generate
+# open the printed local URL (http://127.0.0.1:7860); leave the image blank for text-to-video,
+# or upload one for image-to-video, enter a prompt, click Generate
 ```
 
 ### Verified performance (measured on this machine: M4 Pro, 64GB unified memory)
 
-Default settings (`832x480`, 81 frames, 25 steps, `--low-ram`): **~17.5 minutes** wall clock,
-GPU (Metal via MLX) at 98-100% utilization throughout. Output: 4.05s clip at 20fps. A minimal
-smoke-test run (9 frames, 4 steps) took ~79s — useful for quickly checking the pipeline works
-before committing to a full-length generation.
+Only the dev transformer + CFG one-stage pipeline is available (this checkpoint has no distilled
+LoRA fused in): `--one-stage`, always used by `generate_video()`.
+- T2V, 256x256, 9 frames, 8 steps: 74s.
+- I2V, 320x320, 25 frames, 16 steps: 232s (~3m52s) — real, coherent motion (verified: a
+  head-turn matching the prompt, identity preserved throughout the clip).
+- `--frames` must satisfy `(frames - 1) % 8 == 0` (LTX's latent frame grid).
+
+## Image: Model
+
+[Krea 2 Raw](https://huggingface.co/krea/Krea-2-Raw) (Krea.ai, 12B-parameter dense single-stream
+text-to-image DiT), run through [`mlx-gen-krea`](https://github.com/SceneWorks/mlx-gen) (Apache 2.0),
+a Rust-native MLX inference library — this project builds a small Rust CLI (`krea-gen/`) against it,
+since it's a library, not a standalone tool.
+
+**Unlike the video pipeline, this doesn't use a pre-packaged model download.** The transformer
+weights are converted locally from a user-supplied fp8 checkpoint (ComfyUI-style, from an
+unverified third-party source) via `scripts/convert_krea_model.sh` — see `src/img2vid/krea_convert.py`
+for the exact key-remapping/dequantization logic, derived directly from `mlx-gen-krea`'s Rust
+source, not guessed. The text encoder + VAE come from the official (gated) HF repo separately via
+`scripts/download_krea_components.sh`.
+
+**License**: [Krea 2 Community License](https://huggingface.co/krea/Krea-2-Raw/blob/main/LICENSE.pdf)
+— free for personal/non-commercial use. It contractually requires anyone *deploying* the model to
+implement content-filtering to prevent illegal/NCII/CSAM generation. This project is a plain
+pass-through wrapper with no such filtering built in — appropriate for personal local use, not for
+redistribution or hosting to others without adding that layer yourself.
+
+### Setup
+
+Requires Xcode (not just Command Line Tools — `mlx-gen-krea`'s Metal kernels compile from source)
+and Rust (`rustup`). Both one-time system setup, not scripted here.
+
+```sh
+scripts/build_krea_gen.sh              # cargo build --release (first build compiles MLX's C++ core)
+scripts/convert_krea_model.sh          # converts ~/Downloads/imagemodelfp8.safetensors by default
+scripts/download_krea_components.sh    # text encoder + VAE from the gated krea/Krea-2-Raw repo
+                                        # (needs `hf auth login` + accepting the license on the model page first)
+```
+
+### Usage
+
+```sh
+img2vid-image --prompt "a red fox sitting in a snowy forest, photorealistic, soft morning light" \
+  --output outputs/fox.png --steps 52 --guidance 3.5
+```
+
+Image-to-image editing (optional identity-preserving LoRA):
+```sh
+img2vid-image --prompt "change the background to a snowy mountain" \
+  --edit-source photo.jpg --output outputs/edited.png
+```
+
+Web UI: `scripts/run_image_ui.sh` — upload a reference image to switch to edit mode, or leave it
+blank for text-to-image.
+
+### Verified performance (measured on this machine: M4 Pro, 64GB unified memory)
+
+Krea 2 Raw is a **true classifier-free-guidance model, not distilled for few-step inference** —
+at only 8 steps, output was structurally correct (right composition/pose) but had visible color
+corruption and banding artifacts. At the model's documented **52 steps, guidance 3.5**: a real,
+clean 1024x1024 photorealistic image in **~41 minutes**, GPU at 99% utilization throughout. Use a
+low step count (e.g. 8-20) only for fast pipeline smoke-tests, not for real output.
+
+### Distillation: a 2x-faster LoRA, trained on this hardware
+
+Krea only ships an official few-step model (Turbo) as a *separately, expensively trained*
+checkpoint — not something derivable from Raw via a LoRA. Rather than wait on that, this project
+includes a self-designed single-stage step-distillation trainer
+(`krea-gen/src/bin/distill_train.rs`, progressive distillation per Salimans & Ho 2022, adapted
+to need no second resident model copy) that trains a real LoRA cutting the 52-step baseline down
+to **26 steps at matching quality**, entirely on a single Apple Silicon Mac.
+
+The trained LoRA is published at
+**[huggingface.co/Arekkusul/krea-2-raw-distill-lora](https://huggingface.co/Arekkusul/krea-2-raw-distill-lora)**
+— use it directly via `img2vid-image --distilled` (auto-selects 26 steps + the LoRA), or train
+your own on your own weights following `docs/krea-distillation-research.md` (full method,
+research into 5 rejected published alternatives, and honest results/limitations).
 
 ## Development
 
@@ -74,6 +166,6 @@ ruff check .
 mypy src
 ```
 
-Tests mock the `mlxgen` subprocess entirely — no GPU/model weights needed to run the suite.
-End-to-end verification (real model, real generation) is a separate manual step; see
+Tests mock the `ltx-2-mlx`/`krea-gen` subprocesses entirely — no GPU/model weights needed to run
+the suite. End-to-end verification (real model, real generation) is a separate manual step; see
 `scripts/verify_e2e.sh`.
