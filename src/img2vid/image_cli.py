@@ -18,8 +18,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guidance", type=float, default=3.5)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--edit-source", default=None, help="Reference image path (enables edit mode)")
-    parser.add_argument("--lora", default=None, help="Identity-edit LoRA safetensors path (edit mode only)")
+    parser.add_argument(
+        "--lora", default=None,
+        help="LoRA safetensors path -- the identity-edit LoRA in edit mode, or any "
+        "Raw-trained LoRA (e.g. --distilled) in plain text-to-image mode",
+    )
     parser.add_argument("--turbo-edit", action="store_true", help="Use the distilled CFG-free Turbo edit path")
+    parser.add_argument(
+        "--distilled", action="store_true",
+        help="Text-to-image only: use the self-trained step-distillation LoRA at half the "
+        "steps (26 instead of 52) -- see docs/krea-distillation-research.md",
+    )
+    parser.add_argument(
+        "--quantize",
+        choices=["none", "q4", "q8"],
+        default="q8",
+        help="Weight quantization at load time (default: q8 -- measurably more numerically "
+        "stable than dense, not just smaller/faster; see image_generate.py docstring)",
+    )
     parser.add_argument("--snapshot", default=str(DEFAULT_SNAPSHOT_DIR))
     return parser
 
@@ -41,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
             edit_image_path=Path(args.edit_source) if args.edit_source else None,
             lora_path=Path(args.lora) if args.lora else None,
             turbo_edit=args.turbo_edit,
+            distilled=args.distilled,
+            quantize=args.quantize,
             snapshot=Path(args.snapshot),
         )
     except (FileNotFoundError, ValueError) as exc:

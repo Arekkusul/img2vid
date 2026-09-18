@@ -193,12 +193,100 @@ def test_rejects_turbo_edit_without_edit_source(snapshot_dir, tmp_path):
     mock_run.assert_not_called()
 
 
-def test_rejects_lora_without_edit_source(snapshot_dir, tmp_path):
+def test_lora_included_in_t2i_mode(snapshot_dir, tmp_path):
+    # A Raw-trained LoRA (e.g. the distillation adapter) applies in plain text-to-image mode
+    # too -- krea-gen's --lora flag isn't edit-specific, so this must NOT raise.
+    output_path = tmp_path / "out.png"
     lora = tmp_path / "lora.safetensors"
     lora.write_bytes(b"fake-lora")
+    with patch("img2vid.image_generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_image("a prompt", output_path=output_path, snapshot=snapshot_dir, lora_path=lora)
+    argv = mock_run.call_args.args[0]
+    assert "--lora" in argv
+    assert str(lora) in argv
+    assert "--edit-source" not in argv
+
+
+def test_distilled_defaults_lora_and_steps(snapshot_dir, tmp_path, monkeypatch):
+    output_path = tmp_path / "out.png"
+    lora = tmp_path / "distill.safetensors"
+    lora.write_bytes(b"fake-lora")
+    monkeypatch.setattr("img2vid.image_generate.DEFAULT_DISTILL_LORA", lora)
+    with patch("img2vid.image_generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_image("a prompt", output_path=output_path, snapshot=snapshot_dir, distilled=True)
+    argv = mock_run.call_args.args[0]
+    assert "--lora" in argv
+    assert str(lora) in argv
+    steps_idx = argv.index("--steps")
+    assert argv[steps_idx + 1] == "26"
+
+
+def test_distilled_respects_explicit_steps(snapshot_dir, tmp_path, monkeypatch):
+    output_path = tmp_path / "out.png"
+    lora = tmp_path / "distill.safetensors"
+    lora.write_bytes(b"fake-lora")
+    monkeypatch.setattr("img2vid.image_generate.DEFAULT_DISTILL_LORA", lora)
+    with patch("img2vid.image_generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_image(
+            "a prompt", output_path=output_path, snapshot=snapshot_dir, distilled=True, steps=30
+        )
+    argv = mock_run.call_args.args[0]
+    steps_idx = argv.index("--steps")
+    assert argv[steps_idx + 1] == "30"
+
+
+def test_distilled_rejects_edit_mode(snapshot_dir, edit_image, tmp_path):
     with patch("img2vid.image_generate.subprocess.run") as mock_run:
-        with pytest.raises(ValueError, match="edit_image_path"):
+        with pytest.raises(ValueError, match="edit mode"):
             generate_image(
-                "a prompt", output_path=tmp_path / "out.png", snapshot=snapshot_dir, lora_path=lora
+                "an edit instruction",
+                output_path=tmp_path / "out.png",
+                snapshot=snapshot_dir,
+                edit_image_path=edit_image,
+                distilled=True,
             )
     mock_run.assert_not_called()
+
+
+def test_distilled_missing_lora_raises_actionable_error(snapshot_dir, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "img2vid.image_generate.DEFAULT_DISTILL_LORA", tmp_path / "nonexistent.safetensors"
+    )
+    with patch("img2vid.image_generate.subprocess.run") as mock_run:
+        with pytest.raises(FileNotFoundError, match="Distilled LoRA not found"):
+            generate_image(
+                "a prompt", output_path=tmp_path / "out.png", snapshot=snapshot_dir, distilled=True
+            )
+    mock_run.assert_not_called()
+
+
+def test_quantize_defaults_to_q8(snapshot_dir, tmp_path):
+    # Dense (unquantized) bf16 execution measurably degraded output quality in real testing
+    # (a face-region corruption artifact that disappeared under --quantize q8, despite the
+    # underlying converted weight VALUES already matching the official reference at ~0.999
+    # correlation -- this is a runtime numerical-stability difference, not a weight bug).
+    # Q8 is also documented (krea-gen's own --quantize help text) as near-lossless and
+    # typically faster on Apple Silicon for this model family.
+    output_path = tmp_path / "out.png"
+    with patch("img2vid.image_generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_image("a prompt", output_path=output_path, snapshot=snapshot_dir)
+    argv = mock_run.call_args.args[0]
+    assert "--quantize" in argv
+    assert "q8" in argv
+
+
+def test_quantize_overridable(snapshot_dir, tmp_path):
+    output_path = tmp_path / "out.png"
+    with patch("img2vid.image_generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_image("a prompt", output_path=output_path, snapshot=snapshot_dir, quantize="q4")
+    argv = mock_run.call_args.args[0]
+    assert "--quantize" in argv
+    assert "q4" in argv
+
+
+def test_quantize_none_omits_flag(snapshot_dir, tmp_path):
+    output_path = tmp_path / "out.png"
+    with patch("img2vid.image_generate.subprocess.run", side_effect=_mock_success(output_path)) as mock_run:
+        generate_image("a prompt", output_path=output_path, snapshot=snapshot_dir, quantize="none")
+    argv = mock_run.call_args.args[0]
+    assert "--quantize" not in argv

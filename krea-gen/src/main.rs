@@ -68,7 +68,8 @@ struct Args {
     #[arg(long)]
     edit_source: Option<PathBuf>,
 
-    /// Optional identity-edit LoRA safetensors path (edit mode only).
+    /// Optional LoRA safetensors path -- the identity-edit LoRA in edit mode, or any
+    /// Raw-trained LoRA (e.g. a distillation adapter) in plain text-to-image mode.
     #[arg(long)]
     lora: Option<PathBuf>,
 
@@ -106,16 +107,18 @@ fn save_png(img: &Image, path: &PathBuf) -> Result<(), String> {
 fn run(args: Args) -> Result<(), String> {
     let mut base_spec = LoadSpec::new(WeightsSource::Dir(args.snapshot.clone()));
     base_spec.quantize = args.quantize.into_quant();
+    // Applies in BOTH modes: `load_raw`/`load_edit`/`load_turbo_edit` all route through the same
+    // `load_variant`, which applies `spec.adapters` generically -- a Raw-trained LoRA (e.g. a
+    // distillation adapter) is exactly as valid to install for plain text-to-image as the
+    // identity-edit LoRA is for edit mode.
+    let spec = match &args.lora {
+        Some(lora_path) => {
+            base_spec.with_adapters(vec![AdapterSpec::new(lora_path.clone(), 1.0, AdapterKind::Lora)])
+        }
+        None => base_spec,
+    };
 
     let (generator, conditioning) = if let Some(source_path) = &args.edit_source {
-        let spec = match &args.lora {
-            Some(lora_path) => base_spec.with_adapters(vec![AdapterSpec::new(
-                lora_path.clone(),
-                1.0,
-                AdapterKind::Lora,
-            )]),
-            None => base_spec,
-        };
         let generator = if args.turbo_edit {
             load_turbo_edit(&spec).map_err(|e| format!("load krea_2_turbo_edit: {e}"))?
         } else {
@@ -130,7 +133,7 @@ fn run(args: Args) -> Result<(), String> {
             }],
         )
     } else {
-        let generator = load_raw(&base_spec).map_err(|e| format!("load krea_2_raw: {e}"))?;
+        let generator = load_raw(&spec).map_err(|e| format!("load krea_2_raw: {e}"))?;
         (generator, Vec::new())
     };
 

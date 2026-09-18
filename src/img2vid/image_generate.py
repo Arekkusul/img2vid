@@ -2,6 +2,8 @@ import subprocess
 from pathlib import Path
 
 DEFAULT_SNAPSHOT_DIR = Path.home() / ".cache" / "img2vid" / "krea2-snapshot"
+DEFAULT_DISTILL_LORA = Path.home() / ".cache" / "img2vid" / "krea2-distill-lora.safetensors"
+DISTILLED_STEPS = 26
 
 
 class ImageGenerationError(RuntimeError):
@@ -36,21 +38,57 @@ def generate_image(
     edit_image_path: Path | None = None,
     lora_path: Path | None = None,
     turbo_edit: bool = False,
+    distilled: bool = False,
+    quantize: str = "q8",
     snapshot: Path = DEFAULT_SNAPSHOT_DIR,
     krea_bin: str = DEFAULT_KREA_BIN,
-    timeout: float = 1800,
+    timeout: float = 3600,
 ) -> Path:
     """Generate (or edit) an image with Krea 2 via the krea-gen CLI.
 
     Text-to-image when `edit_image_path` is None; image-edit mode (optionally with an identity
-    LoRA) when it's set. Raises FileNotFoundError/ValueError for bad inputs (fail fast, before
-    spawning a subprocess), or ImageGenerationError if krea-gen fails, hangs past `timeout`
-    seconds, or produces no usable output file.
+    LoRA) when it's set. `lora_path` applies in EITHER mode (Raw-trained LoRAs, e.g. the
+    distillation adapter, are exactly as valid for plain text-to-image as the identity-edit LoRA
+    is for edit mode -- `krea-gen`'s `--lora` flag isn't edit-specific). `turbo_edit` remains
+    edit-mode only (it selects the CFG-free Turbo edit schedule, which has no t2i counterpart).
+
+    `distilled=True` is a t2i-only convenience for the self-trained step-distillation LoRA
+    (`docs/krea-distillation-research.md`): defaults `lora_path` to `DEFAULT_DISTILL_LORA` (if
+    not otherwise given) and `steps` to `DISTILLED_STEPS` (26) *when the caller left `steps` at
+    its plain default of 52* -- an explicit `steps=N` from the caller is always respected.
+    Raises FileNotFoundError with an actionable message if the distilled LoRA hasn't been
+    trained yet.
+
+    Raises FileNotFoundError/ValueError for bad inputs (fail fast, before spawning a
+    subprocess), or ImageGenerationError if krea-gen fails, hangs past `timeout` seconds, or
+    produces no usable output file.
+
+    `quantize` defaults to "q8" ("none" or "q4" also accepted, matching krea-gen's own
+    `--quantize` values -- "none" omits the flag, using krea-gen's own dense default). Measured
+    directly: dense (unquantized) execution produced a real face-region corruption artifact
+    that `--quantize q8` eliminated, even though the underlying converted weight VALUES already
+    matched the official reference checkpoint at ~0.999 correlation -- this is a runtime
+    numerical-stability difference (bf16 matmul precision vs. a well-calibrated int8 path), not
+    a weight-conversion bug. krea-gen's own `--quantize` help text independently documents Q8 as
+    near-lossless and typically faster on Apple Silicon for this model family.
     """
     if not prompt.strip():
         raise ValueError("Prompt must not be empty")
-    if edit_image_path is None and (turbo_edit or lora_path is not None):
-        raise ValueError("turbo_edit/lora_path require edit_image_path (edit mode only)")
+    if edit_image_path is None and turbo_edit:
+        raise ValueError("turbo_edit requires edit_image_path (edit mode only)")
+    if distilled and edit_image_path is not None:
+        raise ValueError("distilled is a text-to-image convenience; it doesn't apply in edit mode")
+
+    if distilled:
+        if lora_path is None:
+            lora_path = DEFAULT_DISTILL_LORA
+        if steps == 52:
+            steps = DISTILLED_STEPS
+        if not Path(lora_path).is_file():
+            raise FileNotFoundError(
+                f"Distilled LoRA not found: {lora_path} "
+                "(train it first -- see docs/krea-distillation-research.md)"
+            )
 
     snapshot = Path(snapshot)
     if not snapshot.is_dir():
@@ -77,14 +115,16 @@ def generate_image(
         "--steps", str(steps),
         "--guidance", str(guidance),
     ]
+    if quantize != "none":
+        argv += ["--quantize", quantize]
     if seed is not None:
         argv += ["--seed", str(seed)]
     if negative_prompt:
         argv += ["--negative-prompt", negative_prompt]
+    if lora_path is not None:
+        argv += ["--lora", str(lora_path)]
     if edit_image_path is not None:
         argv += ["--edit-source", str(edit_image_path)]
-        if lora_path is not None:
-            argv += ["--lora", str(lora_path)]
         if turbo_edit:
             argv.append("--turbo-edit")
 
